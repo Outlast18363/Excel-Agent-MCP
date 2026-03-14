@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Test output
+tests/test_output/
+
+# IDEs and OS
+.vscode/
+.idea/
+.cursor/
+.DS_Store
+*.swp
