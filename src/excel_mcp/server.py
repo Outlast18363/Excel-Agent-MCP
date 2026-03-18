@@ -260,3 +260,38 @@ def local_screenshot(
             return_base64=return_base64,
         )
     )
+
+
+@mcp_server.tool()
+def trace_formula(
+    workbook_id: str,
+    sheet: str,
+    range: str,
+    direction: str,
+    direct_only: bool = True,
+    refresh_graph: bool = True,
+) -> McpResponse:
+    """Trace formula precedents or dependents for a cell or range.
+
+    Parameters:
+        workbook_id: The workbook handle returned by ``open_workbook``.
+        sheet: The sheet name containing the target range.
+        range: The A1 cell or range to trace.
+        direction: Either ``precedents`` or ``dependents``.
+        direct_only: Whether to return only direct edges.
+        refresh_graph: Whether to rebuild the dependency graph before querying.
+
+    Returns:
+        A shared MCP response containing the traced dependency subgraph.
+    """
+
+    return _execute_tool(
+        lambda: excel_service.trace_formula(
+            workbook_id=workbook_id,
+            sheet=sheet,
+            range_address=range,
+            direction=direction,
+            direct_only=direct_only,
+            refresh_graph=refresh_graph,
+        )
+    )

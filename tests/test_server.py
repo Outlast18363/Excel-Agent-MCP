@@ -123,6 +123,31 @@ class ServerToolTests(unittest.TestCase):
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["data"]["image_path"], "/tmp/out.png")
 
+    def test_trace_formula_success(self) -> None:
+        """Verify ``trace_formula`` exposes trace results through the MCP envelope.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. Assertions validate wrapper behavior.
+        """
+
+        payload = {
+            "sheet": "TraceData",
+            "range": "B2",
+            "direction": "precedents",
+            "direct_only": True,
+            "graph_source": "rebuilt",
+            "graph_complete": True,
+            "subgraph": {"B2": [{"range": "A2", "pattern": "NO_COMP"}]},
+        }
+        with patch.object(server.excel_service, "trace_formula", return_value=payload):
+            response = server.trace_formula("wb_001", "TraceData", "B2", "precedents")
+
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(response["data"]["graph_source"], "rebuilt")
+
 
 if __name__ == "__main__":
     unittest.main()

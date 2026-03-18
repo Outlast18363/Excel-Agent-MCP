@@ -26,6 +26,22 @@ EXCEL_ERROR_LITERALS = {
     "#VALUE!",
 }
 
+TACO_PATTERN_LABELS = {
+    "TYPEZERO": "RR_CHAIN",
+    "TYPEONE": "RR",
+    "TYPETWO": "RF",
+    "TYPETHREE": "FR",
+    "TYPEFOUR": "FF",
+    "TYPEFIVE": "RR_GAP_ONE",
+    "TYPESIX": "RR_GAP_TWO",
+    "TYPESEVEN": "RR_GAP_THREE",
+    "TYPEEIGHT": "RR_GAP_FOUR",
+    "TYPENINE": "RR_GAP_FIVE",
+    "TYPETEN": "RR_GAP_SIX",
+    "TYPEELEVEN": "RR_GAP_SEVEN",
+    "NOTYPE": "NO_COMP",
+}
+
 
 class ExcelServiceError(RuntimeError):
     """Raised when an Excel MCP operation cannot be completed safely."""
@@ -50,6 +66,94 @@ def column_number_to_name(column_number: int) -> str:
         current, remainder = divmod(current - 1, 26)
         letters.append(chr(65 + remainder))
     return "".join(reversed(letters))
+
+
+def row_column_to_a1_address(row_number: int, column_number: int) -> str:
+    """Convert 1-based row and column numbers into an Excel A1 address.
+
+    Parameters:
+        row_number: The 1-based worksheet row number.
+        column_number: The 1-based worksheet column number.
+
+    Returns:
+        The corresponding Excel A1 address, such as ``B3``.
+    """
+
+    if row_number < 1:
+        raise ExcelServiceError("Row numbers must be 1 or greater.")
+    return f"{column_number_to_name(column_number)}{row_number}"
+
+
+def zero_based_bounds_to_a1_range(
+    first_row_index: int,
+    first_column_index: int,
+    last_row_index: int,
+    last_column_index: int,
+) -> str:
+    """Convert zero-based rectangle bounds into a normalized A1 cell or range.
+
+    Parameters:
+        first_row_index: The zero-based starting row index.
+        first_column_index: The zero-based starting column index.
+        last_row_index: The zero-based ending row index.
+        last_column_index: The zero-based ending column index.
+
+    Returns:
+        A normalized Excel address string such as ``A1`` or ``B2:C4``.
+    """
+
+    start = row_column_to_a1_address(first_row_index + 1, first_column_index + 1)
+    end = row_column_to_a1_address(last_row_index + 1, last_column_index + 1)
+    return start if start == end else f"{start}:{end}"
+
+
+def normalize_taco_ref_key(ref_key: str) -> str:
+    """Normalize a TACO map key into a plain A1 cell or range string.
+
+    Parameters:
+        ref_key: The serialized TACO reference key, which may wrap ranges in
+            parentheses such as ``"(A1:B2)"``.
+
+    Returns:
+        A normalized Excel A1 address or range without wrapper characters.
+    """
+
+    cleaned = ref_key.strip()
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        return cleaned[1:-1]
+    return cleaned
+
+
+def normalize_taco_pattern(pattern_name: Any) -> str:
+    """Map a raw TACO enum name into a stable MCP-facing pattern label.
+
+    Parameters:
+        pattern_name: The raw enum name returned by the TACO backend.
+
+    Returns:
+        A stable uppercase pattern label such as ``RR`` or ``NO_COMP``.
+    """
+
+    normalized_name = str(pattern_name).upper()
+    return TACO_PATTERN_LABELS.get(normalized_name, normalized_name)
+
+
+def taco_ref_to_a1_address(ref_payload: dict[str, Any]) -> str:
+    """Convert a serialized TACO ref object into an Excel A1 cell or range.
+
+    Parameters:
+        ref_payload: The JSON object returned by TACO for a reference.
+
+    Returns:
+        A normalized Excel A1 address string.
+    """
+
+    return zero_based_bounds_to_a1_range(
+        int(ref_payload["_row"]),
+        int(ref_payload["_column"]),
+        int(ref_payload["_lastRow"]),
+        int(ref_payload["_lastColumn"]),
+    )
 
 
 def normalize_matrix_input(value: Any, rows: int, cols: int, field_name: str) -> list[list[Any]]:
@@ -83,6 +187,31 @@ def normalize_matrix_input(value: Any, rows: int, cols: int, field_name: str) ->
 
     validate_matrix_shape(normalized, rows, cols, field_name)
     return normalized
+
+
+def normalize_formula_grid(formula_grid: Any, rows: int, cols: int) -> list[list[str]]:
+    """Normalize xlwings ``Range.formula`` output into a dense string matrix.
+
+    Parameters:
+        formula_grid: The raw value returned by ``xlwings`` for the target range.
+        rows: The expected number of rows in the range.
+        cols: The expected number of columns in the range.
+
+    Returns:
+        A 2D string matrix where blank cells are represented as ``""``.
+    """
+
+    raw_matrix = normalize_matrix_input(formula_grid, rows, cols, "formula_grid")
+    normalized_matrix: list[list[str]] = []
+    for row in raw_matrix:
+        normalized_row: list[str] = []
+        for cell in row:
+            if cell is None:
+                normalized_row.append("")
+            else:
+                normalized_row.append(str(cell))
+        normalized_matrix.append(normalized_row)
+    return normalized_matrix
 
 
 def validate_matrix_shape(matrix: list[list[Any]], rows: int, cols: int, field_name: str) -> None:
