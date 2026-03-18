@@ -2,7 +2,7 @@
 
 Lightweight Python MCP server for live Excel workbook interaction using `xlwings`.
 
-This mcp aims to help advanced agents runing in codex or claude to smoothly explore and modify the most complex excel files: finiancial statement, multi-sheet mega-size files, excel with sophesticated table & diagram structure, etc.
+This mcp aims to help advanced agents runing in codex or claude to smoothly explore and modify the most complex excel files: finiancial statement, multi-sheet mega-size files, Excel with sophisticated table & diagram structure, etc.
 
 ## MVP tools
 
