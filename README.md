@@ -40,6 +40,11 @@ source .venv/bin/activate
 python3 -m pip install -e .
 ```
 
+This install gives you both:
+
+- the `excel-mcp` console command from `pyproject.toml`
+- the module entrypoint `python -m excel_mcp`
+
 ## Run locally
 
 The server is designed for `stdio` transport because that is the simplest and most compatible mode for local MCP clients.
@@ -93,6 +98,8 @@ Quick checks:
 
 ```text
 excel_mcp/
+├── .codex/
+│   └── config.toml.example
 ├── pyproject.toml
 ├── README.md
 ├── src/
@@ -107,7 +114,42 @@ excel_mcp/
 
 ## Codex setup
 
-Add the server as a local `stdio` MCP process. Example project config:
+Codex supports local `stdio` MCP servers either through the CLI or through `config.toml`. This project is a local `stdio` server and does not require extra environment variables for basic setup. The official Codex MCP docs describe both approaches and the supported config fields like `command`, `args`, `cwd`, `startup_timeout_sec`, and `tool_timeout_sec`.[https://developers.openai.com/codex/mcp](https://developers.openai.com/codex/mcp)
+
+### Option 1: Add with the Codex CLI
+
+From the repository root, after activating the virtualenv and installing the package:
+
+```bash
+source .venv/bin/activate
+codex mcp add excel-mcp -- excel-mcp
+```
+
+If you prefer to avoid relying on the console script path, use the virtualenv interpreter directly:
+
+```bash
+codex mcp add excel-mcp -- \
+  "/Users/jz/Desktop/spreadsheet FINCH proj/excel_mcp/.venv/bin/python" -m excel_mcp
+```
+
+You can inspect configured servers with:
+
+```bash
+codex mcp --help
+```
+
+And in the Codex terminal UI, `/mcp` shows active MCP servers.[https://developers.openai.com/codex/mcp](https://developers.openai.com/codex/mcp)
+
+### Option 2: Configure `config.toml`
+
+Codex can read MCP configuration from either:
+
+- `~/.codex/config.toml`
+- a project-scoped `.codex/config.toml` in a trusted project
+
+The repo includes a ready-to-copy example at `.codex/config.toml.example`.
+
+#### Recommended project-scoped config
 
 ```toml
 [mcp_servers.excel]
@@ -117,7 +159,7 @@ startup_timeout_sec = 20
 tool_timeout_sec = 120
 ```
 
-If you prefer to run from a virtual environment without installing the console script globally:
+#### Virtualenv-based config
 
 ```toml
 [mcp_servers.excel]
@@ -127,6 +169,33 @@ cwd = "/Users/jz/Desktop/spreadsheet FINCH proj/excel_mcp"
 startup_timeout_sec = 20
 tool_timeout_sec = 120
 ```
+
+Notes:
+
+- `command` is required for a `stdio` MCP server.[https://developers.openai.com/codex/mcp](https://developers.openai.com/codex/mcp)
+- `args` is optional and used here only for the virtualenv form.[https://developers.openai.com/codex/mcp](https://developers.openai.com/codex/mcp)
+- `cwd` is recommended for this project so relative paths and local Docker commands behave predictably.[https://developers.openai.com/codex/mcp](https://developers.openai.com/codex/mcp)
+- `startup_timeout_sec` defaults to `10` and `tool_timeout_sec` defaults to `60` in Codex; this repo recommends slightly higher values because opening Excel and tracing formulas can take longer.[https://developers.openai.com/codex/mcp](https://developers.openai.com/codex/mcp)
+- If you want to temporarily disable the server or restrict tools, Codex also supports `enabled`, `required`, `enabled_tools`, and `disabled_tools` in the same config file.[https://developers.openai.com/codex/mcp](https://developers.openai.com/codex/mcp)
+
+### Verify the Codex install
+
+After adding the server, restart Codex if needed and confirm:
+
+1. the server appears in `/mcp`
+2. `open_workbook` and `get_range` are listed as available tools
+3. `trace_formula` works after the TACO backend is running
+
+### Files this repo already includes for Codex
+
+This project already contains the runtime pieces Codex needs for a local `stdio` MCP server:
+
+- `pyproject.toml`: declares the package and the `excel-mcp` console script
+- `src/excel_mcp/__main__.py`: starts the server over stdio
+- `src/excel_mcp/server.py`: defines the FastMCP tool surface
+- `.codex/config.toml.example`: example local Codex configuration
+
+So after installing the package and configuring Codex, you do not need any additional wrapper scripts just to run this MCP locally.
 
 ## Claude Code setup
 
