@@ -1,0 +1,13 @@
+interface:
+  display_name: "Excel MCP"
+  short_description: "Operate on live Excel workbooks through the local excel-mcp server."
+  default_prompt: "Use this skill when the task requires inspecting, editing, recalculating, rendering, or tracing a live Excel workbook through the installed excel-mcp MCP server."
+
+policy:
+  allow_implicit_invocation: true
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "excel-mcp"
+      description: "Local Excel MCP server for workbook sessions, recalculation, screenshots, and formula tracing"

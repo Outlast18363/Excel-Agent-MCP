@@ -100,8 +100,14 @@ Quick checks:
 excel_mcp/
 ├── .codex/
 │   └── config.toml.example
+├── excel_mcp_skill/
+│   ├── SKILL.md
+│   ├── agents/
+│   └── references/
 ├── pyproject.toml
 ├── README.md
+├── SKILL_README.md
+├── skill_install.md
 ├── src/
 │   └── excel_mcp/
 │       ├── __init__.py
@@ -111,6 +117,26 @@ excel_mcp/
 │       └── types.py
 └── tests/
 ```
+
+## Companion skill package
+
+This repo also includes a companion skill package in `excel_mcp_skill/`.
+
+The MCP server provides the powerful live Excel tools, and the skill package provides an expert workflow that helps AI agents use those tools more effectively for complex spreadsheet analysis and editing.
+
+The workflow was optimized by combining proven spreadsheet-skill patterns used in **Codex** and **Claude Code** with repo-specific improvements designed around this MCP's strengths, especially:
+
+- workbook-first discovery with `open_workbook`
+- sheet-level orientation with `get_sheet_state`
+- narrow, context-aware reads with `get_range`
+- formula-safe edits with `set_range`
+- post-edit validation with `recalculate`
+- visual review with `local_screenshot`
+- dependency reasoning with `trace_formula`
+
+In practice, the MCP gives the agent execution power, while the companion skill gives it a better decision process for exploring, modifying, validating, and explaining difficult Excel workbooks.
+
+If you want to install the skill alongside the MCP server, see `SKILL_README.md` and `skill_install.md`.
 
 ## Codex setup
 
