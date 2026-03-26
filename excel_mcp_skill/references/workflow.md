@@ -108,7 +108,7 @@ Typical cases:
 - what downstream cells depend on this input
 - whether a change has broader impact than expected
 
-Use direct tracing first when possible. Use broader tracing only when the task needs lineage or impact analysis across multiple steps.
+Use `max_depth=1` first when possible. Use larger depths or `max_depth=None` only when the task needs lineage or impact analysis across multiple steps.
 
 ## Common Patterns
 

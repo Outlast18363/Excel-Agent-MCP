@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import socket
 import unittest
 from pathlib import Path
 
@@ -19,27 +18,6 @@ MCP_AVAILABLE = importlib.util.find_spec("mcp") is not None
 
 if MCP_AVAILABLE:
     from excel_mcp import server
-
-
-def _is_taco_server_available() -> bool:
-    """Return whether the local TACO backend is reachable for trace tests.
-
-    Parameters:
-        None.
-
-    Returns:
-        ``True`` when the backend accepts TCP connections on the expected port.
-    """
-
-    try:
-        with socket.create_connection(("127.0.0.1", 4567), timeout=1):
-            return True
-    except OSError:
-        return False
-
-
-TACO_SERVER_AVAILABLE = _is_taco_server_available()
-
 
 @unittest.skipUnless(
     XLWINGS_AVAILABLE and MCP_AVAILABLE,
@@ -239,11 +217,11 @@ class ExcelMcpE2ETests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    XLWINGS_AVAILABLE and MCP_AVAILABLE and TACO_SERVER_AVAILABLE,
-    "Trace E2E tests require xlwings, the Python mcp package, and a live TACO backend on localhost:4567.",
+    XLWINGS_AVAILABLE and MCP_AVAILABLE,
+    "Trace E2E tests require xlwings and the Python mcp package.",
 )
 class TraceFormulaE2ETests(unittest.TestCase):
-    """End-to-end tests for the ``trace_formula`` MCP tool."""
+    """End-to-end tests for the native ``trace_formula`` MCP tool."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -268,28 +246,20 @@ class TraceFormulaE2ETests(unittest.TestCase):
 
         cls.app = xw.App(visible=True, add_book=False)
         cls.wb = cls.app.books.add()
-        cls.sheet_trace = cls.wb.sheets[0]
-        cls.sheet_trace.name = "TraceData"
+        cls.sheet_inputs = cls.wb.sheets[0]
+        cls.sheet_inputs.name = "Inputs"
+        cls.sheet_inputs.range("A1:A3").value = [[10], [20], [30]]
 
-        cls.sheet_trace.range("A1:A4").value = [[10], [20], [30], [40]]
-        cls.sheet_trace.range("B1:B4").formula = [
-            ["=A1*2"],
-            ["=A2*2"],
-            ["=A3*2"],
-            ["=A4*2"],
-        ]
-        cls.sheet_trace.range("C1:C4").formula = [
-            ["=SUM(B1:B2)"],
-            ["=SUM(B2:B3)"],
-            ["=SUM(B3:B4)"],
-            ["=SUM(B4:B4)"],
-        ]
-        cls.sheet_trace.range("D1:D4").formula = [
-            ["=C1"],
-            ["=C2"],
-            ["=C3"],
-            ["=C4"],
-        ]
+        cls.sheet_calc = cls.wb.sheets.add("Calc", after=cls.sheet_inputs)
+        cls.sheet_calc.range("B1").formula = "=Inputs!A1"
+        cls.sheet_calc.range("B2").formula = "=SUM(Inputs!A1:A2)"
+        cls.sheet_calc.range("C1").formula = "=B1*2"
+        cls.sheet_calc.range("C2").formula = "=B2+Inputs!A2"
+        cls.sheet_calc.range("D1").formula = "=C1+C2"
+
+        cls.sheet_summary = cls.wb.sheets.add("Summary", after=cls.sheet_calc)
+        cls.sheet_summary.range("A1").formula = "=Calc!C2"
+        cls.sheet_summary.range("A2").formula = "=Calc!D1"
 
         cls.wb.save(str(cls.workbook_path))
         cls.wb.close()
@@ -313,22 +283,33 @@ class TraceFormulaE2ETests(unittest.TestCase):
         server.excel_service.close_all()
 
     @staticmethod
-    def _collect_edge_ranges(response: dict[str, object]) -> set[str]:
-        """Flatten a trace response into the set of returned edge ranges.
+    def _collect_edge_pairs(response: dict[str, object]) -> set[tuple[str, str]]:
+        """Flatten a trace response into the set of returned graph edges.
 
         Parameters:
             response: The MCP response returned by ``trace_formula``.
 
         Returns:
-            A set of all edge-range strings present in the trace subgraph.
+            A set of all ``(from, to)`` edge pairs in the trace graph.
         """
 
-        subgraph = response["data"]["subgraph"]
-        edge_ranges: set[str] = set()
-        for edges in subgraph.values():
-            for edge in edges:
-                edge_ranges.add(edge["range"])
-        return edge_ranges
+        return {
+            (edge["from"], edge["to"])
+            for edge in response["data"]["edges"]
+        }
+
+    @staticmethod
+    def _collect_node_ids(response: dict[str, object]) -> set[str]:
+        """Flatten a trace response into the set of returned node ids.
+
+        Parameters:
+            response: The MCP response returned by ``trace_formula``.
+
+        Returns:
+            A set of all normalized node ids in the trace graph.
+        """
+
+        return {node["id"] for node in response["data"]["nodes"]}
 
     def test_01_open_trace_workbook(self) -> None:
         """Verify the trace workbook can be opened through the MCP service.
@@ -344,11 +325,11 @@ class TraceFormulaE2ETests(unittest.TestCase):
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
 
         data = response["data"]
-        self.assertEqual(data["sheet_names"], ["TraceData"])
+        self.assertEqual(data["sheet_names"], ["Inputs", "Calc", "Summary"])
         self.__class__.workbook_id = data["workbook_id"]
 
-    def test_02_trace_direct_precedents_single_cell(self) -> None:
-        """Verify a single formula cell returns the expected direct precedent range.
+    def test_02_trace_direct_precedents_preserves_range_refs(self) -> None:
+        """Verify direct precedents preserve range refs when formulas uses them.
 
         Parameters:
             None.
@@ -359,18 +340,19 @@ class TraceFormulaE2ETests(unittest.TestCase):
 
         response = server.trace_formula(
             self.workbook_id,
-            "TraceData",
-            "C2",
+            "Calc",
+            "B2",
             "precedents",
-            direct_only=True,
-            refresh_graph=True,
+            max_depth=1,
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
-        self.assertEqual(response["data"]["graph_source"], "rebuilt")
-        self.assertIn("B2:B3", self._collect_edge_ranges(response))
+        self.assertTrue(response["data"]["complete"])
+        self.assertEqual(response["data"]["max_depth"], 1)
+        self.assertIn(("Inputs!A1:A2", "B2"), self._collect_edge_pairs(response))
+        self.assertIn("Inputs!A1:A2", self._collect_node_ids(response))
 
-    def test_03_trace_direct_dependents_single_cell(self) -> None:
-        """Verify a precedent cell returns the expected direct dependent range.
+    def test_03_trace_direct_dependents_expand_range_members(self) -> None:
+        """Verify direct dependents expand range membership for single-cell queries.
 
         Parameters:
             None.
@@ -381,17 +363,18 @@ class TraceFormulaE2ETests(unittest.TestCase):
 
         response = server.trace_formula(
             self.workbook_id,
-            "TraceData",
-            "B2",
+            "Inputs",
+            "A1",
             "dependents",
-            direct_only=True,
-            refresh_graph=True,
+            max_depth=1,
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
-        self.assertIn("C1:C2", self._collect_edge_ranges(response))
+        edge_pairs = self._collect_edge_pairs(response)
+        self.assertIn(("A1", "Calc!B1"), edge_pairs)
+        self.assertIn(("A1", "Calc!B2"), edge_pairs)
 
-    def test_04_trace_direct_precedents_range(self) -> None:
-        """Verify a traced range returns precedent edges rooted in column B.
+    def test_04_trace_transitive_dependents_cross_sheet(self) -> None:
+        """Verify transitive dependent tracing crosses sheets and multiple hops.
 
         Parameters:
             None.
@@ -402,18 +385,19 @@ class TraceFormulaE2ETests(unittest.TestCase):
 
         response = server.trace_formula(
             self.workbook_id,
-            "TraceData",
-            "C1:C3",
-            "precedents",
-            direct_only=True,
-            refresh_graph=True,
+            "Inputs",
+            "A1",
+            "dependents",
+            max_depth=None,
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
-        edge_ranges = self._collect_edge_ranges(response)
-        self.assertTrue(any(edge_range.startswith("B") for edge_range in edge_ranges), edge_ranges)
+        node_ids = self._collect_node_ids(response)
+        self.assertIn("Calc!D1", node_ids)
+        self.assertIn("Summary!A1", node_ids)
+        self.assertIn("Summary!A2", node_ids)
 
-    def test_05_trace_transitive_dependents(self) -> None:
-        """Verify recursive dependent tracing walks through downstream formulas.
+    def test_05_trace_bounded_depth_stops_before_final_outputs(self) -> None:
+        """Verify bounded traversal stops before deeper downstream outputs.
 
         Parameters:
             None.
@@ -424,20 +408,20 @@ class TraceFormulaE2ETests(unittest.TestCase):
 
         response = server.trace_formula(
             self.workbook_id,
-            "TraceData",
-            "A2", # trace A2 to get dependents in B2, then C1:C2, then D1:D2
+            "Inputs",
+            "A1",
             "dependents",
-            direct_only=False,
-            refresh_graph=True,
+            max_depth=2,
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
-        edge_ranges = self._collect_edge_ranges(response)
-        self.assertIn("B2", edge_ranges)
-        self.assertIn("C1:C2", edge_ranges)
-        self.assertIn("D1:D2", edge_ranges)
+        node_ids = self._collect_node_ids(response)
+        self.assertIn("Calc!C1", node_ids)
+        self.assertIn("Calc!C2", node_ids)
+        self.assertNotIn("Calc!D1", node_ids)
+        self.assertNotIn("Summary!A1", node_ids)
 
-    def test_06_trace_sheet_scoped_completeness(self) -> None:
-        """Verify the returned addresses remain in real worksheet coordinates.
+    def test_06_trace_range_precedents_can_skip_address_metadata(self) -> None:
+        """Verify range traces use the new flat payload and optional node metadata.
 
         Parameters:
             None.
@@ -448,71 +432,19 @@ class TraceFormulaE2ETests(unittest.TestCase):
 
         response = server.trace_formula(
             self.workbook_id,
-            "TraceData",
-            "D4",
+            "Calc",
+            "C1:C2",
             "precedents",
-            direct_only=True,
-            refresh_graph=True,
+            max_depth=1,
+            include_addresses=False,
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
-        self.assertTrue(response["data"]["graph_complete"])
-        for source_range, edges in response["data"]["subgraph"].items():
-            self.assertNotIn("(", source_range)
-            self.assertNotIn(")", source_range)
-            for edge in edges:
-                self.assertNotIn("(", edge["range"])
-                self.assertNotIn(")", edge["range"])
-
-    def test_07_trace_graph_reuse(self) -> None:
-        """Verify refresh toggling reuses and invalidates the graph as expected.
-
-        Parameters:
-            None.
-
-        Returns:
-            ``None``. Assertions validate cache reuse and dirty invalidation.
-        """
-
-        first_response = server.trace_formula(
-            self.workbook_id,
-            "TraceData",
-            "B2",
-            "dependents",
-            direct_only=True,
-            refresh_graph=True,
-        )
-        self.assertEqual(first_response["status"], "success", f"Error: {first_response.get('errors')}")
-        self.assertEqual(first_response["data"]["graph_source"], "rebuilt")
-
-        second_response = server.trace_formula(
-            self.workbook_id,
-            "TraceData",
-            "B2",
-            "dependents",
-            direct_only=True,
-            refresh_graph=False,
-        )
-        self.assertEqual(second_response["status"], "success", f"Error: {second_response.get('errors')}")
-        self.assertEqual(second_response["data"]["graph_source"], "cache")
-
-        update_response = server.set_range(
-            self.workbook_id,
-            "TraceData",
-            "D4",
-            formulas=[["=C4+1"]],
-        )
-        self.assertEqual(update_response["status"], "success", f"Error: {update_response.get('errors')}")
-
-        third_response = server.trace_formula(
-            self.workbook_id,
-            "TraceData",
-            "B2",
-            "dependents",
-            direct_only=True,
-            refresh_graph=False,
-        )
-        self.assertEqual(third_response["status"], "success", f"Error: {third_response.get('errors')}")
-        self.assertEqual(third_response["data"]["graph_source"], "rebuilt")
+        edge_pairs = self._collect_edge_pairs(response)
+        self.assertIn(("B1", "C1"), edge_pairs)
+        self.assertIn(("B2", "C2"), edge_pairs)
+        self.assertIn(("Inputs!A2", "C2"), edge_pairs)
+        for node in response["data"]["nodes"]:
+            self.assertEqual(set(node.keys()), {"id"})
 
 if __name__ == "__main__":
     unittest.main()

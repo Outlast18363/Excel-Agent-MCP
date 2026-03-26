@@ -3,39 +3,37 @@
 from __future__ import annotations
 
 import base64
-import gzip
-import json
+import contextlib
+import io
+import tempfile
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 
 from .helpers import (
     ExcelServiceError,
     apply_number_format,
     apply_style,
     build_cell_payload,
-    column_number_to_name,
+    build_trace_node_payload,
+    expand_formulas_ref,
     extract_excel_error,
+    format_formulas_ref,
     get_address,
     get_formula_and_nonempty_counts,
     get_hidden_columns,
     get_hidden_rows,
     get_merged_ranges,
     get_range_geometry,
-    normalize_formula_grid,
     normalize_matrix_input,
-    normalize_taco_pattern,
-    normalize_taco_ref_key,
+    normalize_trace_ref,
+    row_column_to_a1_address,
     safe_count,
     sheet_visible,
-    taco_ref_to_a1_address,
     temporary_screenshot_path,
 )
 from .types import JsonValue
-
-TACO_API_URL = "http://127.0.0.1:4567/api/taco/patterns"
 
 
 @dataclass(slots=True)
@@ -48,9 +46,6 @@ class WorkbookSession:
     path: str
     read_only: bool
     visible: bool
-    trace_graph_sheet: str | None = None
-    trace_graph_ready: bool = False
-    trace_graph_dirty: bool = True
 
 
 class ExcelService:
@@ -62,7 +57,6 @@ class ExcelService:
         self._path_index: dict[str, str] = {}
         self._apps: dict[bool, Any] = {}
         self._next_workbook_number = 1
-        self._active_trace_graph: tuple[str, str] | None = None
 
     def open_workbook(
         self,
@@ -265,8 +259,6 @@ class ExcelService:
             session.workbook.save()
             saved = True
 
-        self._mark_trace_graph_dirty(workbook_id)
-
         return {
             "sheet": sheet,
             "range": get_address(target_range),
@@ -375,8 +367,8 @@ class ExcelService:
         sheet: str,
         range_address: str,
         direction: str,
-        direct_only: bool = True,
-        refresh_graph: bool = True,
+        max_depth: int | None = 1,
+        include_addresses: bool = True,
     ) -> dict[str, JsonValue]:
         """Trace formula precedents or dependents for a cell or range.
 
@@ -385,64 +377,49 @@ class ExcelService:
             sheet: The sheet name containing the target range.
             range_address: The A1 target cell or range to trace.
             direction: Either ``precedents`` or ``dependents``.
-            direct_only: Whether to return only direct edges.
-            refresh_graph: Whether to force a rebuild of the external TACO graph.
+            max_depth: The maximum traversal depth, or ``None`` for full expansion.
+            include_addresses: Whether to include split sheet and range metadata.
 
         Returns:
-            A JSON-safe trace payload containing the queried subgraph.
+            A JSON-safe trace payload containing the native dependency graph slice.
         """
 
         session = self._get_workbook_session(workbook_id)
-        worksheet = self._get_sheet(workbook_id=workbook_id, sheet_name=sheet)
         target_range = self._get_range(
             workbook_id=workbook_id,
             sheet_name=sheet,
             range_address=range_address,
         )
         normalized_direction = self._normalize_trace_direction(direction)
-        build_limit_address, build_limit_row, build_limit_col = self._get_trace_build_limit(worksheet)
-        self._validate_trace_target(
+        normalized_depth = self._normalize_trace_depth(max_depth)
+        trace_model, workbook_name = self._build_trace_model(session)
+        sheet_name_map = {
+            worksheet.name.upper(): worksheet.name
+            for worksheet in session.workbook.sheets
+        }
+        root_refs = self._build_trace_root_refs(
+            workbook_name=workbook_name,
+            sheet=sheet,
             target_range=target_range,
-            build_limit_row=build_limit_row,
-            build_limit_col=build_limit_col,
         )
-
-        graph_source = "cache"
-        if refresh_graph or not self._can_reuse_trace_graph(session, workbook_id, sheet):
-            formula_matrix = self._build_trace_formula_matrix(
-                workbook_id=workbook_id,
-                sheet=sheet,
-                build_limit_address=build_limit_address,
-            )
-            self._post_taco_request(
-                {
-                    "type": "build",
-                    "graph": "taco",
-                    "formulae": formula_matrix,
-                }
-            )
-            session.trace_graph_sheet = sheet
-            session.trace_graph_ready = True
-            session.trace_graph_dirty = False
-            self._active_trace_graph = (workbook_id, sheet)
-            graph_source = "rebuilt"
-
-        query_response = self._post_taco_request(
-            {
-                "type": "dep" if normalized_direction == "dependents" else "prec",
-                "range": f"{sheet}!{get_address(target_range)}",
-                "isDirect": bool(direct_only),
-            }
+        trace_nodes, trace_edges = self._collect_trace_graph(
+            trace_model=trace_model,
+            root_refs=root_refs,
+            direction=normalized_direction,
+            max_depth=normalized_depth,
+            active_sheet=sheet,
+            sheet_name_map=sheet_name_map,
+            include_addresses=include_addresses,
         )
 
         return {
             "sheet": sheet,
             "range": get_address(target_range),
             "direction": normalized_direction,
-            "direct_only": bool(direct_only),
-            "graph_source": graph_source,
-            "graph_complete": True,
-            "subgraph": self._serialize_taco_subgraph(query_response),
+            "max_depth": normalized_depth,
+            "complete": True,
+            "nodes": trace_nodes,
+            "edges": trace_edges,
         }
 
     def _require_xlwings(self) -> Any:
@@ -533,7 +510,6 @@ class ExcelService:
             except Exception:
                 pass
         self._apps.clear()
-        self._active_trace_graph = None
 
     def _recalc_targets(
         self,
@@ -573,212 +549,209 @@ class ExcelService:
             raise ExcelServiceError("`direction` must be `precedents` or `dependents`.")
         return normalized_direction
 
-    def _can_reuse_trace_graph(
-        self,
-        session: WorkbookSession,
-        workbook_id: str,
-        sheet: str,
-    ) -> bool:
-        """Return whether the currently loaded external graph can be reused.
+    def _normalize_trace_depth(self, max_depth: int | None) -> int | None:
+        """Validate and normalize the requested trace depth.
 
         Parameters:
-            session: The active workbook session.
-            workbook_id: The workbook identifier being queried.
-            sheet: The sheet name being queried.
+            max_depth: The user-provided traversal depth, or ``None``.
 
         Returns:
-            ``True`` when the loaded graph matches the same workbook and sheet and
-            the session has not marked it dirty.
+            The normalized traversal depth.
         """
 
-        return (
-            session.trace_graph_ready
-            and not session.trace_graph_dirty
-            and session.trace_graph_sheet == sheet
-            and self._active_trace_graph == (workbook_id, sheet)
-        )
+        if max_depth is None:
+            return None
+        if isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1:
+            raise ExcelServiceError("`max_depth` must be a positive integer or `None`.")
+        return max_depth
 
-    def _get_trace_build_limit(self, worksheet: Any) -> tuple[str, int, int]:
-        """Compute the bottom-right A1 address used to build the sheet graph.
+    def _build_trace_model(self, session: WorkbookSession) -> tuple[Any, str]:
+        """Load a formulas workbook model from a snapshot of the live workbook.
 
         Parameters:
-            worksheet: The live xlwings sheet object to inspect.
+            session: The active workbook session being traced.
 
         Returns:
-            A tuple of ``(address, max_row, max_col)`` for the build rectangle.
+            A tuple of ``(trace_model, workbook_name)``.
         """
 
-        used_range = worksheet.used_range
-        start_row = int(used_range.row)
-        start_col = int(used_range.column)
-        row_count = int(used_range.rows.count)
-        col_count = int(used_range.columns.count)
-        max_row = max(start_row + row_count - 1, 1)
-        max_col = max(start_col + col_count - 1, 1)
-        return f"A1:{column_number_to_name(max_col)}{max_row}", max_row, max_col
+        formulas = self._require_formulas()
+        snapshot_path = self._create_trace_snapshot(session)
+        workbook_name = snapshot_path.name
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                trace_model = formulas.ExcelModel().loads(str(snapshot_path)).finish()
+        except Exception as exc:
+            raise ExcelServiceError(f"Trace formula could not load workbook snapshot: {exc}") from exc
+        finally:
+            if snapshot_path != Path(session.path):
+                snapshot_path.unlink(missing_ok=True)
+        return trace_model, workbook_name
 
-    def _validate_trace_target(
+    def _create_trace_snapshot(self, session: WorkbookSession) -> Path:
+        """Create a temporary workbook snapshot for formulas-based tracing.
+
+        Parameters:
+            session: The active workbook session being traced.
+
+        Returns:
+            The path to a workbook snapshot on disk.
+        """
+
+        suffix = Path(session.path).suffix or ".xlsx"
+        with tempfile.NamedTemporaryFile(prefix="excel-mcp-trace-", suffix=suffix, delete=False) as handle:
+            snapshot_path = Path(handle.name)
+
+        try:
+            session.workbook.api.SaveCopyAs(str(snapshot_path))
+            return snapshot_path
+        except Exception:
+            snapshot_path.unlink(missing_ok=True)
+
+        workbook_path = Path(session.path)
+        if workbook_path.exists():
+            return workbook_path
+        raise ExcelServiceError("Trace formula could not create a workbook snapshot for analysis.")
+
+    def _require_formulas(self) -> Any:
+        """Import the formulas package on demand for trace operations.
+
+        Parameters:
+            None.
+
+        Returns:
+            The imported formulas module.
+        """
+
+        try:
+            import formulas
+        except ImportError as exc:
+            raise ExcelServiceError(
+                "The `formulas` package is required to trace formula dependencies."
+            ) from exc
+        return formulas
+
+    def _build_trace_root_refs(
         self,
         *,
+        workbook_name: str,
+        sheet: str,
         target_range: Any,
-        build_limit_row: int,
-        build_limit_col: int,
-    ) -> None:
-        """Validate that the trace target fits inside the graph build rectangle.
+    ) -> list[str]:
+        """Convert a traced xlwings range into formulas cell refs.
 
         Parameters:
+            workbook_name: The snapshot workbook filename used by formulas.
+            sheet: The target sheet name supplied by the caller.
             target_range: The xlwings range requested by the caller.
-            build_limit_row: The inclusive bottom-most row in the graph build.
-            build_limit_col: The inclusive right-most column in the graph build.
 
         Returns:
-            ``None``. The function raises when the target falls outside the build.
+            A sorted list of workbook-qualified formulas refs for each target cell.
         """
 
-        target_row = int(target_range.row)
-        target_col = int(target_range.column)
-        last_row = target_row + int(target_range.rows.count) - 1
-        last_col = target_col + int(target_range.columns.count) - 1
-        if last_row > build_limit_row or last_col > build_limit_col:
-            limit_address = f"A1:{column_number_to_name(build_limit_col)}{build_limit_row}"
-            raise ExcelServiceError(
-                f"Range `{get_address(target_range)}` lies outside the trace graph build area `{limit_address}`."
-            )
+        root_refs: list[str] = []
+        sheet_name = sheet.upper()
+        start_row = int(target_range.row)
+        start_col = int(target_range.column)
+        row_count = int(target_range.rows.count)
+        col_count = int(target_range.columns.count)
+        for row_offset in range(row_count):
+            for col_offset in range(col_count):
+                root_refs.append(
+                    format_formulas_ref(
+                        workbook_name,
+                        sheet_name,
+                        row_column_to_a1_address(start_row + row_offset, start_col + col_offset),
+                    )
+                )
+        return sorted(root_refs)
 
-    def _build_trace_formula_matrix(
+    def _collect_trace_graph(
         self,
         *,
-        workbook_id: str,
-        sheet: str,
-        build_limit_address: str,
-    ) -> list[list[str]]:
-        """Read and normalize the formula grid used to build the TACO graph.
+        trace_model: Any,
+        root_refs: list[str],
+        direction: str,
+        max_depth: int | None,
+        active_sheet: str,
+        sheet_name_map: dict[str, str],
+        include_addresses: bool,
+    ) -> tuple[list[dict[str, JsonValue]], list[dict[str, JsonValue]]]:
+        """Traverse the formulas model and build a normalized trace graph response.
 
         Parameters:
-            workbook_id: The workbook identifier containing the target sheet.
-            sheet: The sheet name to read.
-            build_limit_address: The A1 rectangle used for graph construction.
+            trace_model: The formulas workbook model.
+            root_refs: The formulas refs at the traced starting range.
+            direction: The normalized trace direction.
+            max_depth: The traversal depth cap, or ``None`` for full traversal.
+            active_sheet: The user-requested sheet name for display normalization.
+            sheet_name_map: Mapping of uppercase sheet names to display names.
+            include_addresses: Whether to include split address metadata on nodes.
 
         Returns:
-            A dense 2D string matrix aligned to worksheet coordinates.
+            A tuple of ``(nodes, edges)`` ready for JSON serialization.
         """
 
-        build_range = self._get_range(
-            workbook_id=workbook_id,
-            sheet_name=sheet,
-            range_address=build_limit_address,
-        )
-        rows = int(build_range.rows.count)
-        cols = int(build_range.columns.count)
-        return normalize_formula_grid(build_range.formula, rows, cols)
+        precedents_by_output: dict[str, set[str]] = {}
+        dependents_by_input: dict[str, set[str]] = defaultdict(set)
 
-    def _post_taco_request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Send a JSON request to the local TACO-Lens backend.
-
-        Parameters:
-            payload: The JSON body to post to the backend.
-
-        Returns:
-            The decoded JSON response from the backend.
-        """
-
-        request_body = json.dumps(payload).encode("utf-8")
-        request = urllib_request.Request(
-            TACO_API_URL,
-            data=request_body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib_request.urlopen(request, timeout=30) as response:
-                body = response.read()
-                if "gzip" in response.headers.get("Content-Encoding", "").lower():
-                    try:
-                        body = gzip.decompress(body)
-                    except OSError:
-                        pass
-        except urllib_error.HTTPError as exc:
-            raise ExcelServiceError(
-                f"TACO backend request failed with HTTP {exc.code}."
-            ) from exc
-        except urllib_error.URLError as exc:
-            raise ExcelServiceError(
-                "Trace formula requires the local TACO-Lens backend at "
-                f"`{TACO_API_URL}` to be running."
-            ) from exc
-
-        try:
-            decoded = body.decode("utf-8")
-            data = json.loads(decoded)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ExcelServiceError("TACO backend returned an unreadable response.") from exc
-
-        if not isinstance(data, dict):
-            raise ExcelServiceError("TACO backend returned an unexpected response shape.")
-        return data
-
-    def _serialize_taco_subgraph(
-        self,
-        response: dict[str, Any],
-    ) -> dict[str, list[dict[str, JsonValue]]]:
-        """Convert a raw TACO subgraph response into stable MCP-facing output.
-
-        Parameters:
-            response: The decoded JSON response returned by the TACO backend.
-
-        Returns:
-            A normalized mapping from source ranges to traced edge payloads.
-        """
-
-        taco_payload = response.get("taco", {})
-        if not isinstance(taco_payload, dict):
-            return {}
-        raw_subgraph = taco_payload.get("default-sheet-name", {})
-        if not isinstance(raw_subgraph, dict):
-            return {}
-
-        normalized_subgraph: dict[str, list[dict[str, JsonValue]]] = {}
-        for raw_key, raw_edges in raw_subgraph.items():
-            if not isinstance(raw_edges, list):
+        for ref, cell in trace_model.cells.items():
+            raw_inputs = getattr(cell, 'inputs', None)
+            if not raw_inputs:
                 continue
-            normalized_edges: list[dict[str, JsonValue]] = []
-            for raw_edge in raw_edges:
-                if not isinstance(raw_edge, dict):
-                    continue
-                ref_payload = raw_edge.get("ref")
-                edge_meta = raw_edge.get("edgeMeta")
-                if not isinstance(ref_payload, dict) or not isinstance(edge_meta, dict):
-                    continue
-                normalized_edges.append(
-                    {
-                        "range": taco_ref_to_a1_address(ref_payload),
-                        "pattern": normalize_taco_pattern(edge_meta.get("patternType")),
-                    }
+
+            output_ref = str(ref)
+            input_refs = {str(input_ref) for input_ref in raw_inputs.keys()}
+            precedents_by_output[output_ref] = input_refs
+            for input_ref in input_refs:
+                dependents_by_input[input_ref].add(output_ref)
+                try:
+                    expanded_refs = expand_formulas_ref(input_ref)
+                except ExcelServiceError:
+                    expanded_refs = []
+                for expanded_ref in expanded_refs:
+                    dependents_by_input[expanded_ref].add(output_ref)
+
+        visited_refs = set(root_refs)
+        pending_refs: deque[tuple[str, int]] = deque((ref, 0) for ref in root_refs)
+        edge_pairs: set[tuple[str, str]] = set()
+
+        while pending_refs:
+            current_ref, depth = pending_refs.popleft()
+            if max_depth is not None and depth >= max_depth:
+                continue
+
+            if direction == 'precedents':
+                next_refs = sorted(precedents_by_output.get(current_ref, set()))
+                new_edges = {(next_ref, current_ref) for next_ref in next_refs}
+            else:
+                next_refs = sorted(dependents_by_input.get(current_ref, set()))
+                new_edges = {(current_ref, next_ref) for next_ref in next_refs}
+
+            edge_pairs.update(new_edges)
+            for next_ref in next_refs:
+                if next_ref not in visited_refs:
+                    visited_refs.add(next_ref)
+                    pending_refs.append((next_ref, depth + 1))
+
+        node_payloads = [
+            build_trace_node_payload(ref, active_sheet, sheet_name_map, include_addresses)
+            for ref in sorted(visited_refs, key=lambda ref: normalize_trace_ref(ref, active_sheet, sheet_name_map))
+        ]
+        normalized_edges = sorted(
+            {
+                (
+                    normalize_trace_ref(source_ref, active_sheet, sheet_name_map),
+                    normalize_trace_ref(target_ref, active_sheet, sheet_name_map),
                 )
-            if normalized_edges:
-                normalized_subgraph[normalize_taco_ref_key(str(raw_key))] = sorted(
-                    normalized_edges,
-                    key=lambda edge: (str(edge["range"]), str(edge["pattern"])),
-                )
-
-        return dict(sorted(normalized_subgraph.items()))
-
-    def _mark_trace_graph_dirty(self, workbook_id: str) -> None:
-        """Mark the trace graph state for a workbook session as stale.
-
-        Parameters:
-            workbook_id: The workbook identifier whose cached trace state changed.
-
-        Returns:
-            ``None``. The in-memory freshness metadata is updated in place.
-        """
-
-        session = self._workbooks.get(workbook_id)
-        if session is None:
-            return
-        session.trace_graph_dirty = True
-        if self._active_trace_graph and self._active_trace_graph[0] == workbook_id:
-            self._active_trace_graph = None
+                for source_ref, target_ref in edge_pairs
+            }
+        )
+        edge_payloads = [
+            {'from': source_ref, 'to': target_ref}
+            for source_ref, target_ref in normalized_edges
+        ]
+        return node_payloads, edge_payloads
 
 
 excel_service = ExcelService()

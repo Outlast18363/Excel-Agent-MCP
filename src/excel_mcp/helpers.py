@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from openpyxl.utils.cell import range_boundaries
+
 from .types import JsonValue, normalize_excel_value
 
 EXCEL_ERROR_LITERALS = {
@@ -25,23 +27,6 @@ EXCEL_ERROR_LITERALS = {
     "#UNKNOWN!",
     "#VALUE!",
 }
-
-TACO_PATTERN_LABELS = {
-    "TYPEZERO": "RR_CHAIN",
-    "TYPEONE": "RR",
-    "TYPETWO": "RF",
-    "TYPETHREE": "FR",
-    "TYPEFOUR": "FF",
-    "TYPEFIVE": "RR_GAP_ONE",
-    "TYPESIX": "RR_GAP_TWO",
-    "TYPESEVEN": "RR_GAP_THREE",
-    "TYPEEIGHT": "RR_GAP_FOUR",
-    "TYPENINE": "RR_GAP_FIVE",
-    "TYPETEN": "RR_GAP_SIX",
-    "TYPEELEVEN": "RR_GAP_SEVEN",
-    "NOTYPE": "NO_COMP",
-}
-
 
 class ExcelServiceError(RuntimeError):
     """Raised when an Excel MCP operation cannot be completed safely."""
@@ -107,53 +92,121 @@ def zero_based_bounds_to_a1_range(
     return start if start == end else f"{start}:{end}"
 
 
-def normalize_taco_ref_key(ref_key: str) -> str:
-    """Normalize a TACO map key into a plain A1 cell or range string.
+def parse_formulas_ref(ref: str) -> tuple[str, str, str]:
+    """Split a `formulas` workbook-qualified ref into workbook, sheet, and A1 range.
 
     Parameters:
-        ref_key: The serialized TACO reference key, which may wrap ranges in
-            parentheses such as ``"(A1:B2)"``.
+        ref: A workbook-qualified ref such as ``"'[book.xlsx]SHEET1'!A1:B2"``.
 
     Returns:
-        A normalized Excel A1 address or range without wrapper characters.
+        A tuple of ``(workbook_name, sheet_name, range_address)``.
     """
 
-    cleaned = ref_key.strip()
-    if cleaned.startswith("(") and cleaned.endswith(")"):
-        return cleaned[1:-1]
-    return cleaned
+    cleaned = ref.strip()
+    try:
+        prefix, range_address = cleaned.rsplit("!", 1)
+    except ValueError as exc:
+        raise ExcelServiceError(f"Unsupported formulas ref: {ref}") from exc
+
+    prefix = prefix.strip("'")
+    if not prefix.startswith("[") or "]" not in prefix:
+        raise ExcelServiceError(f"Unsupported formulas ref: {ref}")
+
+    workbook_end = prefix.index("]")
+    workbook_name = prefix[1:workbook_end]
+    sheet_name = prefix[workbook_end + 1:]
+    if not workbook_name or not sheet_name or not range_address:
+        raise ExcelServiceError(f"Unsupported formulas ref: {ref}")
+    return workbook_name, sheet_name, range_address
 
 
-def normalize_taco_pattern(pattern_name: Any) -> str:
-    """Map a raw TACO enum name into a stable MCP-facing pattern label.
+def format_formulas_ref(workbook_name: str, sheet_name: str, range_address: str) -> str:
+    """Build a workbook-qualified `formulas` ref string.
 
     Parameters:
-        pattern_name: The raw enum name returned by the TACO backend.
+        workbook_name: The workbook filename used by the formulas model.
+        sheet_name: The sheet identifier used by the formulas model.
+        range_address: The A1 cell or range address.
 
     Returns:
-        A stable uppercase pattern label such as ``RR`` or ``NO_COMP``.
+        A workbook-qualified ref string compatible with `formulas`.
     """
 
-    normalized_name = str(pattern_name).upper()
-    return TACO_PATTERN_LABELS.get(normalized_name, normalized_name)
+    return f"'[{workbook_name}]{sheet_name}'!{range_address}"
 
 
-def taco_ref_to_a1_address(ref_payload: dict[str, Any]) -> str:
-    """Convert a serialized TACO ref object into an Excel A1 cell or range.
+def expand_formulas_ref(ref: str) -> list[str]:
+    """Expand a `formulas` ref into workbook-qualified single-cell refs.
 
     Parameters:
-        ref_payload: The JSON object returned by TACO for a reference.
+        ref: A workbook-qualified formulas ref for a cell or rectangular range.
 
     Returns:
-        A normalized Excel A1 address string.
+        A list of workbook-qualified single-cell refs.
     """
 
-    return zero_based_bounds_to_a1_range(
-        int(ref_payload["_row"]),
-        int(ref_payload["_column"]),
-        int(ref_payload["_lastRow"]),
-        int(ref_payload["_lastColumn"]),
-    )
+    workbook_name, sheet_name, range_address = parse_formulas_ref(ref)
+    min_col, min_row, max_col, max_row = range_boundaries(range_address)
+    expanded_refs: list[str] = []
+    for row_number in range(min_row, max_row + 1):
+        for column_number in range(min_col, max_col + 1):
+            expanded_refs.append(
+                format_formulas_ref(
+                    workbook_name,
+                    sheet_name,
+                    row_column_to_a1_address(row_number, column_number),
+                )
+            )
+    return expanded_refs
+
+
+def normalize_trace_ref(ref: str, active_sheet: str, sheet_name_map: dict[str, str]) -> str:
+    """Normalize a formulas ref into the MCP-facing trace node identifier.
+
+    Parameters:
+        ref: A workbook-qualified formulas ref.
+        active_sheet: The user-requested sheet for the trace operation.
+        sheet_name_map: Mapping of uppercase sheet names to display sheet names.
+
+    Returns:
+        A display ref that omits the sheet for same-sheet refs and keeps it for
+        cross-sheet refs.
+    """
+
+    _, sheet_name, range_address = parse_formulas_ref(ref)
+    display_sheet = sheet_name_map.get(sheet_name.upper(), sheet_name)
+    if display_sheet.upper() == active_sheet.upper():
+        return range_address
+    return f"{display_sheet}!{range_address}"
+
+
+def build_trace_node_payload(
+    ref: str,
+    active_sheet: str,
+    sheet_name_map: dict[str, str],
+    include_addresses: bool,
+) -> dict[str, JsonValue]:
+    """Build a normalized node payload for the `trace_formula` response.
+
+    Parameters:
+        ref: A workbook-qualified formulas ref.
+        active_sheet: The user-requested sheet for the trace operation.
+        sheet_name_map: Mapping of uppercase sheet names to display sheet names.
+        include_addresses: Whether to include split sheet/range fields.
+
+    Returns:
+        A JSON-safe node payload for the trace graph response.
+    """
+
+    _, sheet_name, range_address = parse_formulas_ref(ref)
+    display_sheet = sheet_name_map.get(sheet_name.upper(), sheet_name)
+    node_payload: dict[str, JsonValue] = {
+        "id": normalize_trace_ref(ref, active_sheet, sheet_name_map),
+    }
+    if include_addresses:
+        node_payload["sheet"] = display_sheet
+        node_payload["range"] = range_address
+    return node_payload
 
 
 def normalize_matrix_input(value: Any, rows: int, cols: int, field_name: str) -> list[list[Any]]:

@@ -137,16 +137,20 @@ class ServerToolTests(unittest.TestCase):
             "sheet": "TraceData",
             "range": "B2",
             "direction": "precedents",
-            "direct_only": True,
-            "graph_source": "rebuilt",
-            "graph_complete": True,
-            "subgraph": {"B2": [{"range": "A2", "pattern": "NO_COMP"}]},
+            "max_depth": 1,
+            "complete": True,
+            "nodes": [
+                {"id": "A2", "sheet": "TraceData", "range": "A2"},
+                {"id": "B2", "sheet": "TraceData", "range": "B2"},
+            ],
+            "edges": [{"from": "A2", "to": "B2"}],
         }
         with patch.object(server.excel_service, "trace_formula", return_value=payload):
-            response = server.trace_formula("wb_001", "TraceData", "B2", "precedents")
+            response = server.trace_formula("wb_001", "TraceData", "B2", "precedents", max_depth=1)
 
         self.assertEqual(response["status"], "success")
-        self.assertEqual(response["data"]["graph_source"], "rebuilt")
+        self.assertEqual(response["data"]["max_depth"], 1)
+        self.assertEqual(response["data"]["edges"], [{"from": "A2", "to": "B2"}])
 
 
 if __name__ == "__main__":

@@ -7,13 +7,15 @@ from datetime import date, datetime
 
 from excel_mcp.helpers import (
     ExcelServiceError,
+    build_trace_node_payload,
     column_number_to_name,
+    expand_formulas_ref,
+    format_formulas_ref,
     hex_to_rgb_tuple,
     normalize_formula_grid,
     normalize_matrix_input,
-    normalize_taco_pattern,
-    normalize_taco_ref_key,
-    taco_ref_to_a1_address,
+    normalize_trace_ref,
+    parse_formulas_ref,
     validate_matrix_shape,
 )
 from excel_mcp.types import error_response, normalize_excel_value, success_response
@@ -130,48 +132,133 @@ class HelperTests(unittest.TestCase):
         with self.assertRaises(ExcelServiceError):
             validate_matrix_shape([[1, 2]], 2, 2, "values")
 
-    def test_taco_ref_to_a1_address_converts_zero_based_bounds(self) -> None:
-        """Verify TACO ref payloads convert into worksheet A1 ranges.
+    def test_parse_formulas_ref_splits_workbook_sheet_and_range(self) -> None:
+        """Verify formulas refs split into workbook, sheet, and range parts.
 
         Parameters:
             None.
 
         Returns:
-            ``None``. Assertions validate ref serialization.
+            ``None``. Assertions validate formulas-ref parsing.
         """
 
         self.assertEqual(
-            taco_ref_to_a1_address(
-                {"_row": 1, "_column": 1, "_lastRow": 2, "_lastColumn": 2}
+            parse_formulas_ref("'[book.xlsx]SHEET ONE'!B2:C3"),
+            ("book.xlsx", "SHEET ONE", "B2:C3"),
+        )
+
+    def test_format_formulas_ref_builds_qualified_ref(self) -> None:
+        """Verify formulas refs can be rebuilt from workbook, sheet, and range.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. Assertions validate formulas-ref formatting.
+        """
+
+        self.assertEqual(
+            format_formulas_ref("book.xlsx", "SHEET1", "A1:B2"),
+            "'[book.xlsx]SHEET1'!A1:B2",
+        )
+
+    def test_expand_formulas_ref_expands_ranges_into_single_cells(self) -> None:
+        """Verify formulas range refs expand into workbook-qualified cell refs.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. Assertions validate range expansion.
+        """
+
+        self.assertEqual(
+            expand_formulas_ref("'[book.xlsx]INPUTS'!A1:B2"),
+            [
+                "'[book.xlsx]INPUTS'!A1",
+                "'[book.xlsx]INPUTS'!B1",
+                "'[book.xlsx]INPUTS'!A2",
+                "'[book.xlsx]INPUTS'!B2",
+            ],
+        )
+
+    def test_normalize_trace_ref_omits_same_sheet_prefix(self) -> None:
+        """Verify same-sheet trace refs normalize into plain A1 addresses.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. Assertions validate same-sheet normalization.
+        """
+
+        self.assertEqual(
+            normalize_trace_ref(
+                "'[book.xlsx]CALC'!B2:C3",
+                "Calc",
+                {"CALC": "Calc", "INPUTS": "Inputs"},
             ),
             "B2:C3",
         )
 
-    def test_normalize_taco_ref_key_strips_range_parentheses(self) -> None:
-        """Verify serialized TACO map keys normalize into plain A1 text.
+    def test_normalize_trace_ref_keeps_cross_sheet_prefix(self) -> None:
+        """Verify cross-sheet trace refs keep the display sheet prefix.
 
         Parameters:
             None.
 
         Returns:
-            ``None``. Assertions validate key cleanup.
+            ``None``. Assertions validate cross-sheet normalization.
         """
 
-        self.assertEqual(normalize_taco_ref_key("(A1:B2)"), "A1:B2")
-        self.assertEqual(normalize_taco_ref_key("C3"), "C3")
+        self.assertEqual(
+            normalize_trace_ref(
+                "'[book.xlsx]INPUTS'!A1",
+                "Calc",
+                {"CALC": "Calc", "INPUTS": "Inputs"},
+            ),
+            "Inputs!A1",
+        )
 
-    def test_normalize_taco_pattern_maps_internal_enum_names(self) -> None:
-        """Verify internal TACO enum names map into stable public labels.
+    def test_build_trace_node_payload_includes_address_parts(self) -> None:
+        """Verify node payloads include address metadata when requested.
 
         Parameters:
             None.
 
         Returns:
-            ``None``. Assertions validate pattern-name normalization.
+            ``None``. Assertions validate node-payload formatting.
         """
 
-        self.assertEqual(normalize_taco_pattern("TYPEONE"), "RR")
-        self.assertEqual(normalize_taco_pattern("NOTYPE"), "NO_COMP")
+        self.assertEqual(
+            build_trace_node_payload(
+                "'[book.xlsx]INPUTS'!A1:A2",
+                "Calc",
+                {"CALC": "Calc", "INPUTS": "Inputs"},
+                True,
+            ),
+            {"id": "Inputs!A1:A2", "sheet": "Inputs", "range": "A1:A2"},
+        )
+
+    def test_build_trace_node_payload_can_skip_split_metadata(self) -> None:
+        """Verify node payloads can omit split address metadata.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. Assertions validate compact node-payload formatting.
+        """
+
+        self.assertEqual(
+            build_trace_node_payload(
+                "'[book.xlsx]CALC'!C1",
+                "Calc",
+                {"CALC": "Calc"},
+                False,
+            ),
+            {"id": "C1"},
+        )
 
     def test_normalize_formula_grid_preserves_shape_and_blanks(self) -> None:
         """Verify xlwings-style formula outputs normalize into dense matrices.

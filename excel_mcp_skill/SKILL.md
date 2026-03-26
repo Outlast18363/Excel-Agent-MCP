@@ -32,7 +32,7 @@ IMPORTANT: System and user instructions always take precedence.
 - `set_range`: write values, formulas, number formats, and lightweight styles. See [references/set_range.md](references/set_range.md)
 - `recalculate`: trigger Excel recalculation and scan formula cells for errors. See [references/recalculate.md](references/recalculate.md)
 - `local_screenshot`: export a rendered PNG of a range for review. See [references/local_screenshot.md](references/local_screenshot.md)
-- `trace_formula`: trace precedents or dependents through the local backend. See [references/trace_formula.md](references/trace_formula.md)
+- `trace_formula`: trace precedents or dependents through the native workbook graph. See [references/trace_formula.md](references/trace_formula.md)
 
 ## Workflow and references
 

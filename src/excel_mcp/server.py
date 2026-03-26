@@ -268,8 +268,8 @@ def trace_formula(
     sheet: str,
     range: str,
     direction: str,
-    direct_only: bool = True,
-    refresh_graph: bool = True,
+    max_depth: int | None = 1,
+    include_addresses: bool = True,
 ) -> McpResponse:
     """Trace formula precedents or dependents for a cell or range.
 
@@ -278,11 +278,11 @@ def trace_formula(
         sheet: The sheet name containing the target range.
         range: The A1 cell or range to trace.
         direction: Either ``precedents`` or ``dependents``.
-        direct_only: Whether to return only direct edges.
-        refresh_graph: Whether to rebuild the dependency graph before querying.
+        max_depth: The maximum traversal depth, or ``None`` for full expansion.
+        include_addresses: Whether to include split sheet and range metadata.
 
     Returns:
-        A shared MCP response containing the traced dependency subgraph.
+        A shared MCP response containing the traced dependency graph slice.
     """
 
     return _execute_tool(
@@ -291,7 +291,7 @@ def trace_formula(
             sheet=sheet,
             range_address=range,
             direction=direction,
-            direct_only=direct_only,
-            refresh_graph=refresh_graph,
+            max_depth=max_depth,
+            include_addresses=include_addresses,
         )
     )

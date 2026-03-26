@@ -49,7 +49,6 @@ Use this for live workbook edits such as entering inputs, replacing formulas, cl
 - Multi-cell `values`, `formulas`, and matrix `number_format` payloads must match the target range shape exactly.
 - A scalar is accepted for a single-cell target and normalized to a `1 x 1` matrix.
 - If both `values` and `formulas` are provided, formulas are written after values, so formulas win.
-- This tool marks the cached trace graph as dirty, so a later trace may rebuild even if `refresh_graph=False`.
 
 ## Example
 

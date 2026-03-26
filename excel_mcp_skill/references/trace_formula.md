@@ -2,9 +2,9 @@
 
 ## What It Does
 
-Traces formula precedents or dependents for a cell or range using the local TACO backend.
+Traces formula precedents or dependents for a cell or range using the in-process `formulas` workbook model.
 
-It can return either direct edges only or a larger transitive dependency subgraph.
+It can return a direct graph slice, a bounded-depth graph slice, or a fully transitive graph depending on `max_depth`.
 
 ## When To Use It
 
@@ -18,34 +18,35 @@ Use this when you need dependency reasoning, impact analysis, or formula lineage
 - `direction: str`
   - `precedents` for upstream inputs
   - `dependents` for downstream formulas
-- `direct_only: bool = True`
-- `refresh_graph: bool = True`
+- `max_depth: int | None = 1`
+- `include_addresses: bool = True`
 
 ## Returns In `data`
 
 - `sheet`
 - `range`
 - `direction`
-- `direct_only`
-- `graph_source`
-- `graph_complete`
-- `subgraph`
+- `max_depth`
+- `complete`
+- `nodes`
+- `edges`
 
-Each subgraph edge looks like:
+Each graph edge looks like:
 
 ```json
 {
-  "range": "B2:B3",
-  "pattern": "..."
+  "from": "Inputs!A1:A2",
+  "to": "B2"
 }
 ```
 
 ## Notes
 
-- This tool requires the local TACO-Lens backend at `http://127.0.0.1:4567/api/taco/patterns`.
-- The current implementation builds and queries one worksheet graph at a time.
-- The build area is bounded by the sheet's current used-range extent, normalized to an `A1:<bottom_right>` rectangle.
-- If the workbook changed after the last graph build, a cached graph may be treated as stale and rebuilt even when `refresh_graph=False`.
+- This tool does not require Docker, Java, or any local HTTP backend.
+- The implementation snapshots the live workbook and builds a native workbook graph with `formulas.ExcelModel`.
+- Cross-sheet refs are preserved in normalized ids like `Inputs!A1` when they leave the active sheet.
+- `max_depth=1` means direct edges only.
+- `max_depth=None` means full transitive traversal.
 
 ## Example
 
@@ -55,7 +56,7 @@ trace_formula(
     sheet="Calc",
     range="B2",
     direction="dependents",
-    direct_only=True,
-    refresh_graph=True,
+    max_depth=1,
+    include_addresses=True,
 )
 ```

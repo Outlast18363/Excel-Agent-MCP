@@ -97,4 +97,5 @@ enabled = false
 ## Notes
 
 - `agents/openai.yaml` declares the MCP dependency by server name, but it does not install the local server for you.
+- `trace_formula` runs natively inside the Python MCP server and does not require a separate Taco or Docker backend.
 - After adding or changing skills, restart Codex if the new skill does not appear immediately.
