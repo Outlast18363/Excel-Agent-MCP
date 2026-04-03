@@ -38,16 +38,21 @@ def open_workbook(
     visible: bool = True,
     create_if_missing: bool = False,
 ) -> McpResponse:
-    """Open a live Excel workbook and register a workbook session.
+    """Open a live Excel workbook and return a session ``workbook_id`` for all later calls.
+
+    If the resolved path matches an existing session, the session is reused
+    unchanged (even if ``visible`` or ``read_only`` differ).
 
     Parameters:
-        path: Full file path of the workbook to open.
-        read_only: Whether to open the workbook without allowing edits.
-        visible: Whether Excel should be visible on screen.
-        create_if_missing: Whether to create a new workbook when the file is missing.
+        path: Filesystem path to the workbook (resolved to absolute internally).
+        read_only: Open without allowing edits.
+        visible: Whether the managed Excel window is shown on screen.
+        create_if_missing: Create and save a new workbook at ``path`` (with
+            parent directories) when the file does not exist.
 
     Returns:
-        A shared MCP response containing workbook session metadata.
+        ``workbook_id``, resolved ``path``, ``sheet_names``, ``active_sheet``,
+        and ``read_only`` flag.
     """
 
     return _execute_tool(
@@ -70,19 +75,24 @@ def get_sheet_state(
     include_formula_stats: bool = True,
     include_object_counts: bool = True,
 ) -> McpResponse:
-    """Return objective sheet-level metadata for a workbook sheet.
+    """Return sheet-level structural metadata: bounds, hidden rows/columns,
+    merged areas, formula/nonempty counts, and chart/shape counts.
 
     Parameters:
         workbook_id: The workbook handle returned by ``open_workbook``.
         sheet: The sheet name to inspect.
-        include_used_range: Whether to include used range boundaries.
-        include_hidden: Whether to include hidden rows and columns.
-        include_merged_ranges: Whether to include merged-cell ranges.
-        include_formula_stats: Whether to include formula and non-empty cell counts.
-        include_object_counts: Whether to include chart and shape counts.
+        include_used_range: Return ``used_range`` address, ``max_row``, and
+            ``max_col`` for the occupied rectangle.
+        include_hidden: Return lists of hidden row numbers and column letters
+            within the used range.
+        include_merged_ranges: Return deduplicated A1 addresses of merged areas.
+        include_formula_stats: Return ``formula_count`` (cells starting with
+            ``=``) and ``nonempty_cell_count``.
+        include_object_counts: Return ``chart_count`` and ``shape_count``.
 
     Returns:
-        A shared MCP response containing structural sheet metadata.
+        Always includes ``sheet`` and ``visible`` (sheet tab visibility).
+        Other fields are conditional on the ``include_*`` flags.
     """
 
     return _execute_tool(
@@ -111,22 +121,28 @@ def get_range(
     include_hidden_flags: bool = False,
     include_merged_info: bool = False,
 ) -> McpResponse:
-    """Return a matrix and flattened cell view for an explicit Excel range.
+    """Read cell data for an A1 range, returned as a row-major ``matrix`` and
+    a flat ``cells`` list (same objects, different layout).
 
     Parameters:
         workbook_id: The workbook handle returned by ``open_workbook``.
         sheet: The sheet name containing the target range.
-        range: The A1 range to inspect.
-        include_values: Whether to include cell values.
-        include_formulas: Whether to include formula strings.
-        include_number_formats: Whether to include number format strings.
-        include_styles: Whether to include shallow style details.
-        include_geometry: Whether to include range and cell geometry.
-        include_hidden_flags: Whether to include hidden row or column flags.
-        include_merged_info: Whether to include merged-cell membership details.
+        range: The A1-style address to read (e.g. ``B4:E12``).
+        include_values: Return each cell's computed value.
+        include_formulas: Return formula strings (``=``-prefixed) where
+            present; ``null`` for non-formula cells.
+        include_number_formats: Return Excel number format codes.
+        include_styles: Return per-cell style snapshots (font, fill, alignment,
+            wrap).
+        include_geometry: Return per-cell and range-level position/size in
+            points (``left``, ``top``, ``width``, ``height``).
+        include_hidden_flags: Return ``row_hidden`` and ``column_hidden`` bools.
+        include_merged_info: Return ``is_merged`` flag and ``merged_range``
+            address when the cell belongs to a merge.
 
     Returns:
-        A shared MCP response containing range-level cell data.
+        ``sheet``, ``range``, ``matrix``, ``cells``. Each cell always has
+        ``address``, ``row``, ``column``; other fields depend on flags.
     """
 
     return _execute_tool(
@@ -158,22 +174,33 @@ def set_range(
     clear_formats: bool = False,
     save_after: bool = False,
 ) -> McpResponse:
-    """Write values, formulas, and formatting into an explicit Excel range.
+    """Write values, formulas, number formats, and styles into an A1 range.
+
+    Execution order: clear_contents, clear_formats, values, formulas,
+    number_format, style, save. If both ``values`` and ``formulas`` are
+    given, formulas are written last and win.
 
     Parameters:
         workbook_id: The workbook handle returned by ``open_workbook``.
         sheet: The sheet name containing the target range.
-        range: The A1 range to modify.
-        values: Optional 2D values to write.
-        formulas: Optional 2D formulas to write.
-        number_format: Optional scalar or 2D number format payload.
-        style: Optional style settings to apply to the target range.
-        clear_contents: Whether to clear cell contents before writing.
-        clear_formats: Whether to clear formatting before applying updates.
-        save_after: Whether to save the workbook after the operation.
+        range: The A1-style address to modify (e.g. ``D1``, ``A1:B3``).
+        values: 2D list matching range shape, or a scalar for a single-cell
+            range (auto-wrapped to ``[[value]]``).
+        formulas: 2D list matching range shape, or a scalar for a single-cell
+            range.
+        number_format: A single Excel format string applied uniformly, or a 2D
+            list matching range shape for per-cell formats.
+        style: Dict of style keys to apply. Supported: ``fill_color``,
+            ``font_name``, ``font_size``, ``font_bold``, ``font_italic``,
+            ``font_color``, ``horizontal_alignment``, ``vertical_alignment``,
+            ``wrap_text``. Colors use ``#RRGGBB`` hex.
+        clear_contents: Clear cell contents before writing.
+        clear_formats: Clear formatting before applying updates.
+        save_after: Save the workbook after the operation.
 
     Returns:
-        A shared MCP response describing what changed.
+        ``sheet``, ``range``, and boolean flags ``updated_values``,
+        ``updated_formulas``, ``updated_style``, ``saved``.
     """
 
     return _execute_tool(
@@ -202,19 +229,29 @@ def recalculate(
     return_formula_stats: bool = True,
     max_error_locations_per_type: int = 50,
 ) -> McpResponse:
-    """Trigger Excel recalculation and optionally scan formula cells for errors.
+    """Force Excel to recalculate and optionally scan formula cells for errors.
+
+    Recalculation always runs at the application level. The ``scope``
+    parameter controls which cells are **scanned** afterward for errors and
+    formula counts.
 
     Parameters:
         workbook_id: The workbook handle returned by ``open_workbook``.
-        scope: The recalculation scope: ``workbook``, ``sheet``, or ``range``.
-        sheet: The target sheet when scope is ``sheet`` or ``range``.
-        range: The target range when scope is ``range``.
-        scan_errors: Whether to inspect formula cells for Excel errors.
-        return_formula_stats: Whether to include total formula counts.
-        max_error_locations_per_type: The cap on returned example error locations.
+        scope: Scan scope after recalc: ``workbook`` (all sheets),
+            ``sheet`` (one sheet), or ``range`` (one range).
+        sheet: Required when scope is ``sheet`` or ``range``.
+        range: Required when scope is ``range``.
+        scan_errors: Inspect formula cells for Excel error values (``#DIV/0!``,
+            ``#REF!``, etc.) and return ``total_errors`` and
+            ``error_summary``.
+        return_formula_stats: Return ``total_formulas`` count.
+        max_error_locations_per_type: Cap on sample cell addresses per error
+            type in ``error_summary``.
 
     Returns:
-        A shared MCP response containing recalculation and error scan results.
+        Always ``scope`` and ``recalculated``. Conditionally ``sheet``,
+        ``range``, ``total_formulas``, ``total_errors``, ``error_summary``
+        depending on inputs and flags.
     """
 
     return _execute_tool(
@@ -238,17 +275,22 @@ def local_screenshot(
     output_path: str | None = None,
     return_base64: bool = False,
 ) -> McpResponse:
-    """Capture the rendered on-screen appearance of an Excel range.
+    """Export a rendered PNG of an Excel range (not a full-screen capture).
+
+    The output is composited onto a white background so every pixel is
+    fully opaque.
 
     Parameters:
         workbook_id: The workbook handle returned by ``open_workbook``.
         sheet: The sheet name containing the target range.
-        range: The A1 range to capture.
-        output_path: Optional destination path for the PNG file.
-        return_base64: Whether to include base64 PNG bytes in the response.
+        range: The A1-style address to capture.
+        output_path: Destination path for the PNG file. A temporary file is
+            created when omitted.
+        return_base64: Include base64-encoded PNG bytes in the response as
+            ``base64``.
 
     Returns:
-        A shared MCP response containing screenshot output details.
+        ``sheet``, ``range``, ``image_path``, and optionally ``base64``.
     """
 
     return _execute_tool(
@@ -271,18 +313,24 @@ def trace_formula(
     max_depth: int | None = 1,
     include_addresses: bool = True,
 ) -> McpResponse:
-    """Trace formula precedents or dependents for a cell or range.
+    """Trace formula precedents or dependents for a cell or range and return
+    a directed graph of nodes and edges.
 
     Parameters:
         workbook_id: The workbook handle returned by ``open_workbook``.
-        sheet: The sheet name containing the target range.
-        range: The A1 cell or range to trace.
-        direction: Either ``precedents`` or ``dependents``.
-        max_depth: The maximum traversal depth, or ``None`` for full expansion.
-        include_addresses: Whether to include split sheet and range metadata.
+        sheet: The sheet name containing the target cell or range.
+        range: The A1-style address to trace.
+        direction: ``precedents`` (upstream inputs) or ``dependents``
+            (downstream formulas).
+        max_depth: Traversal depth limit. ``1`` = direct edges only;
+            ``None`` = full transitive closure.
+        include_addresses: When true, each node includes ``sheet`` and
+            ``range`` fields alongside ``id``.
 
     Returns:
-        A shared MCP response containing the traced dependency graph slice.
+        ``sheet``, ``range``, ``direction``, ``max_depth``, ``complete``,
+        ``nodes``, and ``edges``. Same-sheet refs omit the sheet prefix in
+        node ids; cross-sheet refs use ``Sheet!Range`` format.
     """
 
     return _execute_tool(
