@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
 from .helpers import (
     ExcelServiceError,
     apply_number_format,
@@ -348,6 +350,15 @@ class ExcelService:
         
         # Use xlwings native to_png method
         target_range.to_png(str(target_path))
+
+        # xlwings produces RGBA PNGs where unfilled cells are fully transparent,
+        # making text invisible on non-white viewers. Composite onto a white
+        # background and convert to RGB so the result is fully opaque.
+        img = Image.open(str(target_path))
+        if img.mode == "RGBA":
+            background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            composited = Image.alpha_composite(background, img)
+            composited.convert("RGB").save(str(target_path))
 
         data: dict[str, JsonValue] = {
             "sheet": sheet,

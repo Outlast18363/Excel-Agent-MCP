@@ -2,26 +2,31 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import unittest
 from pathlib import Path
 
-# Skip tests if xlwings is not installed (e.g. in CI without Excel)
+# Import optional runtime dependencies defensively so collection can skip cleanly
+# instead of failing with a transitive import error.
 try:
     import xlwings as xw
     XLWINGS_AVAILABLE = True
 except ImportError:
+    xw = None
     XLWINGS_AVAILABLE = False
 
-MCP_AVAILABLE = importlib.util.find_spec("mcp") is not None
-
-if MCP_AVAILABLE:
+try:
     from excel_mcp import server
+    SERVER_IMPORTABLE = True
+except ImportError:
+    server = None
+    SERVER_IMPORTABLE = False
+
+E2E_RUNTIME_AVAILABLE = XLWINGS_AVAILABLE and SERVER_IMPORTABLE
 
 @unittest.skipUnless(
-    XLWINGS_AVAILABLE and MCP_AVAILABLE,
-    "E2E tests require xlwings and the Python mcp package.",
+    E2E_RUNTIME_AVAILABLE,
+    "E2E tests require xlwings and all excel_mcp runtime dependencies.",
 )
 class ExcelMcpE2ETests(unittest.TestCase):
     """End-to-end tests exercising all MCP endpoints against a live Excel process."""
@@ -200,7 +205,18 @@ class ExcelMcpE2ETests(unittest.TestCase):
             self.assertTrue(found_c1, f"C1 error missing. Summary: {errors}")
 
     def test_06_local_screenshot(self) -> None:
-        """Verify screenshots are saved correctly to disk."""
+        """Verify screenshots capture cell fill colors and have an opaque background."""
+        # Apply green fill to column A so the screenshot visibly captures color
+        color_resp = server.set_range(
+            self.workbook_id,
+            "Data",
+            "A1:A10",
+            style={"fill_color": "#00B050"},
+            save_after=True,
+        )
+        self.assertEqual(color_resp["status"], "success", f"Error: {color_resp.get('errors')}")
+        self.assertTrue(color_resp["data"]["updated_style"])
+
         response = server.local_screenshot(
             self.workbook_id,
             "Data",
@@ -213,12 +229,19 @@ class ExcelMcpE2ETests(unittest.TestCase):
         
         # Assert the file actually appeared on the filesystem
         self.assertTrue(self.screenshot_path.exists())
-        self.assertGreater(self.screenshot_path.stat().st_size, 100) # Ensure it's not a 0-byte file
+        self.assertGreater(self.screenshot_path.stat().st_size, 100)
+
+        # Verify the screenshot has an opaque (non-transparent) background
+        from PIL import Image
+        img = Image.open(str(self.screenshot_path))
+        if img.mode == "RGBA":
+            alpha_min = img.getchannel("A").getextrema()[0]
+            self.assertEqual(alpha_min, 255, "Screenshot still contains transparent pixels")
 
 
 @unittest.skipUnless(
-    XLWINGS_AVAILABLE and MCP_AVAILABLE,
-    "Trace E2E tests require xlwings and the Python mcp package.",
+    E2E_RUNTIME_AVAILABLE,
+    "Trace E2E tests require xlwings and all excel_mcp runtime dependencies.",
 )
 class TraceFormulaE2ETests(unittest.TestCase):
     """End-to-end tests for the native ``trace_formula`` MCP tool."""
