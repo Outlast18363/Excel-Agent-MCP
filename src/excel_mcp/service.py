@@ -17,7 +17,7 @@ from .helpers import (
     ExcelServiceError,
     apply_number_format,
     apply_style,
-    build_cell_payload,
+    build_style_lookup,
     build_trace_node_payload,
     expand_formulas_ref,
     extract_excel_error,
@@ -25,11 +25,17 @@ from .helpers import (
     get_address,
     get_formula_and_nonempty_counts,
     get_hidden_columns,
+    get_range_hidden_flags,
     get_hidden_rows,
     get_merged_ranges,
     get_range_geometry,
     normalize_matrix_input,
+    normalize_formula_grid,
+    normalize_number_format_value,
+    normalize_number_format_grid,
+    normalize_range_read_matrix,
     normalize_trace_ref,
+    read_number_format,
     row_column_to_a1_address,
     safe_count,
     sheet_visible,
@@ -168,33 +174,47 @@ class ExcelService:
         include_merged_info: bool = False,
     ) -> dict[str, JsonValue]:
         target_range = self._get_range(workbook_id=workbook_id, sheet_name=sheet, range_address=range_address)
-        matrix: list[list[dict[str, JsonValue]]] = []
-        cells: list[dict[str, JsonValue]] = []
-
-        for row_offset in range(int(target_range.rows.count)):
-            matrix_row: list[dict[str, JsonValue]] = []
-            for col_offset in range(int(target_range.columns.count)):
-                cell = target_range[row_offset, col_offset]
-                cell_payload = build_cell_payload(
-                    cell=cell,
-                    include_values=include_values,
-                    include_formulas=include_formulas,
-                    include_number_formats=include_number_formats,
-                    include_styles=include_styles,
-                    include_geometry=include_geometry,
-                    include_hidden_flags=include_hidden_flags,
-                    include_merged_info=include_merged_info,
-                )
-                matrix_row.append(cell_payload)
-                cells.append(cell_payload)
-            matrix.append(matrix_row)
+        rows = int(target_range.rows.count)
+        cols = int(target_range.columns.count)
 
         data: dict[str, JsonValue] = {
             "sheet": sheet,
             "range": get_address(target_range),
-            "matrix": matrix,
-            "cells": cells,
+            "rows": rows,
+            "columns": cols,
         }
+
+        if include_values:
+            values_matrix = normalize_range_read_matrix(
+                target_range.options(ndim=2, chunksize=10_000).value,
+                rows,
+                cols,
+                "values",
+            )
+            data["values"] = values_matrix
+
+        if include_formulas:
+            data["formulas"] = normalize_formula_grid(target_range.formula, rows, cols)
+
+        if include_number_formats:
+            data["number_formats"] = self._get_number_format_matrix(
+                target_range=target_range,
+                rows=rows,
+                cols=cols,
+            )
+
+        if include_styles:
+            style_table, style_ids = build_style_lookup(target_range, rows, cols)
+            data["style_table"] = style_table
+            data["style_ids"] = style_ids
+
+        if include_hidden_flags:
+            row_hidden, column_hidden = get_range_hidden_flags(target_range, rows, cols)
+            data["row_hidden"] = row_hidden
+            data["column_hidden"] = column_hidden
+
+        if include_merged_info:
+            data["merged_ranges"] = get_merged_ranges(target_range)
 
         if include_geometry:
             data["geometry"] = get_range_geometry(target_range)
@@ -371,6 +391,63 @@ class ExcelService:
 
         return data
 
+    def close_workbook(
+        self,
+        *,
+        workbook_id: str,
+        save: bool = False,
+    ) -> dict[str, JsonValue]:
+        """Close one managed workbook and release its Excel app when unused.
+
+        Parameters:
+            workbook_id: The workbook handle returned by ``open_workbook``.
+            save: Whether to save pending edits before closing the workbook.
+
+        Returns:
+            A JSON-safe payload describing whether the workbook was saved,
+            closed, and whether its backing Excel app was also shut down.
+        """
+
+        session = self._get_workbook_session(workbook_id)
+        if save and session.read_only:
+            raise ExcelServiceError("Cannot save a read-only workbook while closing it.")
+
+        if save:
+            try:
+                session.workbook.save()
+            except Exception as exc:
+                raise ExcelServiceError(
+                    f"Workbook `{workbook_id}` could not be saved before closing."
+                ) from exc
+
+        try:
+            session.workbook.close()
+        except Exception as exc:
+            raise ExcelServiceError(f"Workbook `{workbook_id}` could not be closed.") from exc
+
+        self._workbooks.pop(workbook_id, None)
+        if self._path_index.get(session.path) == workbook_id:
+            self._path_index.pop(session.path, None)
+
+        app_closed = False
+        has_other_sessions = any(other.app is session.app for other in self._workbooks.values())
+        if not has_other_sessions:
+            # Drop the app from the cache so later opens create a fresh handle.
+            self._apps.pop(session.visible, None)
+            try:
+                session.app.quit()
+                app_closed = True
+            except Exception:
+                app_closed = False
+
+        return {
+            "workbook_id": workbook_id,
+            "path": session.path,
+            "saved": bool(save),
+            "closed": True,
+            "app_closed": app_closed,
+        }
+
     def trace_formula(
         self,
         *,
@@ -504,6 +581,45 @@ class ExcelService:
             raise ExcelServiceError(
                 f"Range `{range_address}` is invalid on sheet `{sheet_name}`."
             ) from exc
+
+    def _get_number_format_matrix(
+        self,
+        *,
+        target_range: Any,
+        rows: int,
+        cols: int,
+    ) -> list[list[str | None]]:
+        """Read number formats with a bulk-first strategy and a safe fallback.
+
+        Parameters:
+            target_range: The xlwings range to inspect.
+            rows: The number of rows in the range.
+            cols: The number of columns in the range.
+
+        Returns:
+            A 2D matrix of Excel number format strings aligned to the range.
+        """
+
+        raw_number_format = read_number_format(target_range)
+        if rows == 1 and cols == 1:
+            return normalize_number_format_grid(raw_number_format, rows, cols)
+
+        if raw_number_format is not None:
+            try:
+                return normalize_number_format_grid(raw_number_format, rows, cols)
+            except ExcelServiceError:
+                pass
+
+        number_format_matrix: list[list[str | None]] = []
+        for row_offset in range(rows):
+            format_row: list[str | None] = []
+            for col_offset in range(cols):
+                cell = target_range[row_offset, col_offset]
+                cell_number_format = read_number_format(cell)
+                format_row.append(normalize_number_format_value(cell_number_format))
+            number_format_matrix.append(format_row)
+
+        return number_format_matrix
 
     def close_all(self) -> None:
         """Safely close all registered workbooks and quit any managed Excel apps."""

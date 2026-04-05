@@ -65,7 +65,7 @@ class ServerToolTests(unittest.TestCase):
             ``None``. Assertions validate wrapper behavior.
         """
 
-        payload = {"sheet": "Sheet1", "range": "A1:B2", "matrix": [], "cells": []}
+        payload = {"sheet": "Sheet1", "range": "A1:B2", "rows": 2, "columns": 2, "values": []}
         with patch.object(server.excel_service, "get_range", return_value=payload):
             response = server.get_range("wb_001", "Sheet1", "A1:B2")
 

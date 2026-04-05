@@ -14,8 +14,11 @@ from excel_mcp.helpers import (
     hex_to_rgb_tuple,
     normalize_formula_grid,
     normalize_matrix_input,
+    normalize_number_format_grid,
+    normalize_range_read_matrix,
     normalize_trace_ref,
     parse_formulas_ref,
+    style_payload_key,
     validate_matrix_shape,
 )
 from excel_mcp.types import error_response, normalize_excel_value, success_response
@@ -272,8 +275,77 @@ class HelperTests(unittest.TestCase):
 
         self.assertEqual(
             normalize_formula_grid([["=A1*2", None], [3, "text"]], 2, 2),
-            [["=A1*2", ""], ["3", "text"]],
+            [["=A1*2", None], [None, None]],
         )
+
+    def test_normalize_range_read_matrix_supports_single_row_outputs(self) -> None:
+        """Verify one-row xlwings reads become a single nested list.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. Assertions validate read-matrix normalization.
+        """
+
+        self.assertEqual(
+            normalize_range_read_matrix([1, 2, 3], 1, 3, "values"),
+            [[1, 2, 3]],
+        )
+
+    def test_normalize_range_read_matrix_supports_single_column_outputs(self) -> None:
+        """Verify one-column xlwings reads become one value per nested row.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. Assertions validate read-matrix normalization.
+        """
+
+        self.assertEqual(
+            normalize_range_read_matrix([1, 2, 3], 3, 1, "values"),
+            [[1], [2], [3]],
+        )
+
+    def test_normalize_number_format_grid_broadcasts_uniform_scalars(self) -> None:
+        """Verify one uniform number format can fill an entire target matrix.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. Assertions validate number-format normalization.
+        """
+
+        self.assertEqual(
+            normalize_number_format_grid("0.00%", 2, 2),
+            [["0.00%", "0.00%"], ["0.00%", "0.00%"]],
+        )
+
+    def test_style_payload_key_is_stable_for_identical_styles(self) -> None:
+        """Verify identical style payloads produce the same deduplication key.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. Assertions validate style-key stability.
+        """
+
+        shared_style = {
+            "font_name": "Calibri",
+            "font_size": 11.0,
+            "font_bold": False,
+            "font_italic": False,
+            "font_color": None,
+            "horizontal_alignment": None,
+            "vertical_alignment": None,
+            "wrap_text": False,
+            "fill_color": "#FFFFFF",
+        }
+
+        self.assertEqual(style_payload_key(shared_style), style_payload_key(dict(shared_style)))
 
 
 if __name__ == "__main__":

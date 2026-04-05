@@ -2,33 +2,52 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import TextContent
 
 from .service import ExcelServiceError, excel_service
 from .types import McpResponse, error_response, success_response
 
-mcp_server = FastMCP("Excel MCP", json_response=True)
+mcp_server = FastMCP("Excel MCP")
+
+McpToolResult = tuple[list[TextContent], McpResponse]
 
 
-def _execute_tool(operation: Callable[[], dict[str, Any]]) -> McpResponse:
+def _build_tool_result(payload: McpResponse) -> McpToolResult:
+    """Return compact text plus structured content for one MCP tool response.
+
+    Parameters:
+        payload: The shared response envelope to expose through MCP.
+
+    Returns:
+        A tuple of compact text content for transcript efficiency and the same
+        structured payload for clients that read `structuredContent`.
+    """
+
+    compact_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return ([TextContent(type="text", text=compact_json)], payload)
+
+
+def _execute_tool(operation: Callable[[], dict[str, Any]]) -> McpToolResult:
     """Run a service-layer operation and normalize failures for MCP callers.
 
     Parameters:
         operation: A zero-argument callable that performs the requested work.
 
     Returns:
-        A shared response envelope containing either data or a user-facing error.
+        Compact text content plus the shared structured response envelope.
     """
 
     try:
-        return success_response(operation())
+        return _build_tool_result(success_response(operation()))
     except ExcelServiceError as exc:
-        return error_response(str(exc))
+        return _build_tool_result(error_response(str(exc)))
     except Exception as exc:  # pragma: no cover - defensive integration guard
-        return error_response(f"Unexpected server error: {exc}")
+        return _build_tool_result(error_response(f"Unexpected server error: {exc}"))
 
 
 @mcp_server.tool()
@@ -37,7 +56,7 @@ def open_workbook(
     read_only: bool = False,
     visible: bool = True,
     create_if_missing: bool = False,
-) -> McpResponse:
+) -> McpToolResult:
     """Open a live Excel workbook and return a session ``workbook_id`` for all later calls.
 
     If the resolved path matches an existing session, the session is reused
@@ -66,6 +85,30 @@ def open_workbook(
 
 
 @mcp_server.tool()
+def close_workbook(
+    workbook_id: str,
+    save: bool = False,
+) -> McpToolResult:
+    """Close one managed workbook and release its Excel app when possible.
+
+    Parameters:
+        workbook_id: The workbook handle returned by ``open_workbook``.
+        save: Save pending workbook edits before closing when ``True``.
+
+    Returns:
+        ``workbook_id``, resolved ``path``, ``saved``, ``closed``, and
+        ``app_closed`` to describe the cleanup result.
+    """
+
+    return _execute_tool(
+        lambda: excel_service.close_workbook(
+            workbook_id=workbook_id,
+            save=save,
+        )
+    )
+
+
+@mcp_server.tool()
 def get_sheet_state(
     workbook_id: str,
     sheet: str,
@@ -74,7 +117,7 @@ def get_sheet_state(
     include_merged_ranges: bool = True,
     include_formula_stats: bool = True,
     include_object_counts: bool = True,
-) -> McpResponse:
+) -> McpToolResult:
     """Return sheet-level structural metadata: bounds, hidden rows/columns,
     merged areas, formula/nonempty counts, and chart/shape counts.
 
@@ -120,9 +163,8 @@ def get_range(
     include_geometry: bool = False,
     include_hidden_flags: bool = False,
     include_merged_info: bool = False,
-) -> McpResponse:
-    """Read cell data for an A1 range, returned as a row-major ``matrix`` and
-    a flat ``cells`` list (same objects, different layout).
+) -> McpToolResult:
+    """Read cell data for an A1 range using dense range-aligned payload fields.
 
     Parameters:
         workbook_id: The workbook handle returned by ``open_workbook``.
@@ -130,19 +172,21 @@ def get_range(
         range: The A1-style address to read (e.g. ``B4:E12``).
         include_values: Return each cell's computed value.
         include_formulas: Return formula strings (``=``-prefixed) where
-            present; ``null`` for non-formula cells.
-        include_number_formats: Return Excel number format codes.
-        include_styles: Return per-cell style snapshots (font, fill, alignment,
-            wrap).
-        include_geometry: Return per-cell and range-level position/size in
-            points (``left``, ``top``, ``width``, ``height``).
-        include_hidden_flags: Return ``row_hidden`` and ``column_hidden`` bools.
-        include_merged_info: Return ``is_merged`` flag and ``merged_range``
-            address when the cell belongs to a merge.
+            present; ``null`` for non-formula cells in the aligned matrix.
+        include_number_formats: Return a 2D ``number_formats`` matrix aligned to
+            the requested range.
+        include_styles: Return a shared ``style_table`` plus per-cell
+            ``style_ids`` references instead of repeating full style dicts.
+        include_geometry: Return range-level position and size in points
+            (``left``, ``top``, ``width``, ``height``).
+        include_hidden_flags: Return top-level ``row_hidden`` and
+            ``column_hidden`` boolean arrays aligned to the range.
+        include_merged_info: Return deduplicated ``merged_ranges`` once per
+            response instead of per-cell merge flags.
 
     Returns:
-        ``sheet``, ``range``, ``matrix``, ``cells``. Each cell always has
-        ``address``, ``row``, ``column``; other fields depend on flags.
+        ``sheet``, ``range``, ``rows``, ``columns``, plus optional dense payload
+        fields controlled by the ``include_*`` flags.
     """
 
     return _execute_tool(
@@ -173,7 +217,7 @@ def set_range(
     clear_contents: bool = False,
     clear_formats: bool = False,
     save_after: bool = False,
-) -> McpResponse:
+) -> McpToolResult:
     """Write values, formulas, number formats, and styles into an A1 range.
 
     Execution order: clear_contents, clear_formats, values, formulas,
@@ -228,7 +272,7 @@ def recalculate(
     scan_errors: bool = True,
     return_formula_stats: bool = True,
     max_error_locations_per_type: int = 50,
-) -> McpResponse:
+) -> McpToolResult:
     """Force Excel to recalculate and optionally scan formula cells for errors.
 
     Recalculation always runs at the application level. The ``scope``
@@ -274,7 +318,7 @@ def local_screenshot(
     range: str,
     output_path: str | None = None,
     return_base64: bool = False,
-) -> McpResponse:
+) -> McpToolResult:
     """Export a rendered PNG of an Excel range (not a full-screen capture).
 
     The output is composited onto a white background so every pixel is
@@ -312,7 +356,7 @@ def trace_formula(
     direction: str,
     max_depth: int | None = 1,
     include_addresses: bool = True,
-) -> McpResponse:
+) -> McpToolResult:
     """Trace formula precedents or dependents for a cell or range and return
     a directed graph of nodes and edges.
 

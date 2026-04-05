@@ -144,19 +144,38 @@ class ExcelMcpE2ETests(unittest.TestCase):
         
         data = response["data"]
         self.assertEqual(data["range"], "A1:B2")
-        matrix = data["matrix"]
-        
-        # Check A1
-        a1 = matrix[0][0]
-        self.assertEqual(a1["value"], 1.0)
-        self.assertEqual(a1["formula"], None)
-        self.assertTrue(a1["style"]["font_bold"])
-        
-        # Check B2
-        b2 = matrix[1][1]
-        self.assertEqual(b2["value"], 4.0)
-        self.assertEqual(b2["formula"], "=A2*2")
-        self.assertFalse(b2["style"]["font_bold"])
+        self.assertEqual(data["rows"], 2)
+        self.assertEqual(data["columns"], 2)
+        self.assertNotIn("matrix", data)
+        self.assertNotIn("cells", data)
+
+        self.assertEqual(data["values"][0][0], 1.0)
+        self.assertEqual(data["formulas"][0][0], None)
+        self.assertEqual(data["values"][1][1], 4.0)
+        self.assertEqual(data["formulas"][1][1], "=A2*2")
+
+        a1_style = data["style_table"][data["style_ids"][0][0]]
+        b2_style = data["style_table"][data["style_ids"][1][1]]
+        self.assertTrue(a1_style["font_bold"])
+        self.assertFalse(b2_style["font_bold"])
+
+    def test_03b_get_range_large_payload_is_dense(self) -> None:
+        """Verify large range payloads use dense arrays instead of duplicated cells."""
+        response = server.get_range(
+            self.workbook_id,
+            "Data",
+            "A1:B10",
+            include_values=True,
+        )
+        self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
+
+        data = response["data"]
+        self.assertEqual(data["rows"], 10)
+        self.assertEqual(data["columns"], 2)
+        self.assertEqual(len(data["values"]), 10)
+        self.assertEqual(len(data["values"][0]), 2)
+        self.assertNotIn("matrix", data)
+        self.assertNotIn("cells", data)
 
     def test_04_set_range(self) -> None:
         """Verify the server can update values via set_range."""
@@ -174,9 +193,10 @@ class ExcelMcpE2ETests(unittest.TestCase):
         
         # Immediately verify the write worked
         verify_resp = server.get_range(self.workbook_id, "Data", "D1", include_styles=True)
-        cell = verify_resp["data"]["cells"][0]
-        self.assertEqual(cell["value"], "Updated")
-        self.assertTrue(cell["style"]["font_bold"])
+        verify_data = verify_resp["data"]
+        self.assertEqual(verify_data["values"][0][0], "Updated")
+        cell_style = verify_data["style_table"][verify_data["style_ids"][0][0]]
+        self.assertTrue(cell_style["font_bold"])
 
     def test_05_recalculate(self) -> None:
         """Verify recalculation detects formula errors."""
@@ -237,6 +257,33 @@ class ExcelMcpE2ETests(unittest.TestCase):
         if img.mode == "RGBA":
             alpha_min = img.getchannel("A").getextrema()[0]
             self.assertEqual(alpha_min, 255, "Screenshot still contains transparent pixels")
+
+    def test_07_close_workbook(self) -> None:
+        """Verify the server can close a workbook and release its cached session.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. The test asserts the workbook close tool succeeds and
+            removes the cached session state.
+        """
+
+        workbook_id = getattr(self.__class__, "workbook_id", "")
+        if not workbook_id:
+            open_response = server.open_workbook(str(self.workbook_path), visible=False)
+            self.assertEqual(open_response["status"], "success", f"Error: {open_response.get('errors')}")
+            workbook_id = open_response["data"]["workbook_id"]
+            self.__class__.workbook_id = workbook_id
+
+        response = server.close_workbook(workbook_id, save=False)
+        self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
+
+        data = response["data"]
+        self.assertEqual(data["workbook_id"], workbook_id)
+        self.assertTrue(data["closed"])
+        self.assertNotIn(workbook_id, server.excel_service._workbooks)
+        self.assertNotIn(str(self.workbook_path.resolve()), server.excel_service._path_index)
 
 
 @unittest.skipUnless(
