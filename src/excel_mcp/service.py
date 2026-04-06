@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from openpyxl import load_workbook
+from openpyxl.utils.cell import range_boundaries
 from PIL import Image
 
 from .helpers import (
@@ -19,14 +21,12 @@ from .helpers import (
     apply_style,
     build_style_lookup,
     build_trace_node_payload,
+    column_number_to_name,
     expand_formulas_ref,
     extract_excel_error,
     format_formulas_ref,
     get_address,
-    get_formula_and_nonempty_counts,
-    get_hidden_columns,
     get_range_hidden_flags,
-    get_hidden_rows,
     get_merged_ranges,
     get_range_geometry,
     normalize_matrix_input,
@@ -122,42 +122,85 @@ class ExcelService:
         include_formula_stats: bool = True,
         include_object_counts: bool = True,
     ) -> dict[str, JsonValue]:
+        session = self._get_workbook_session(workbook_id)
         worksheet = self._get_sheet(workbook_id=workbook_id, sheet_name=sheet)
-        used_range = worksheet.used_range
-        start_row = int(used_range.row)
-        start_col = int(used_range.column)
-        row_count = int(used_range.rows.count)
-        col_count = int(used_range.columns.count)
-        max_row = start_row + max(row_count - 1, 0)
-        max_col = start_col + max(col_count - 1, 0)
+        snapshot_path = self._create_sheet_state_snapshot(session)
+        workbook_formula = None
 
-        data: dict[str, JsonValue] = {
-            "sheet": worksheet.name,
-            "visible": sheet_visible(worksheet),
-        }
+        try:
+            # Read structural metadata from an on-disk workbook snapshot so the
+            # result does not depend on slow per-cell COM round-trips.
+            workbook_formula = load_workbook(
+                snapshot_path,
+                read_only=False,
+                data_only=False,
+                keep_links=False,
+            )
+            worksheet_formula = workbook_formula[sheet]
 
-        if include_used_range:
-            data["used_range"] = get_address(used_range)
-            data["max_row"] = max_row
-            data["max_col"] = max_col
+            used_range = worksheet_formula.calculate_dimension()
+            start_col, start_row, max_col, max_row = range_boundaries(used_range)
 
-        if include_hidden:
-            data["hidden_rows"] = get_hidden_rows(worksheet, start_row, max_row)
-            data["hidden_columns"] = get_hidden_columns(worksheet, start_col, max_col)
+            data: dict[str, JsonValue] = {
+                "sheet": worksheet_formula.title,
+                "visible": worksheet_formula.sheet_state == "visible",
+            }
 
-        if include_merged_ranges:
-            data["merged_ranges"] = get_merged_ranges(used_range)
+            if include_used_range:
+                data["used_range"] = used_range
+                data["max_row"] = max_row
+                data["max_col"] = max_col
 
-        if include_formula_stats:
-            formula_count, nonempty_count = get_formula_and_nonempty_counts(used_range)
-            data["formula_count"] = formula_count
-            data["nonempty_cell_count"] = nonempty_count
+            if include_hidden:
+                data["hidden_rows"] = [
+                    row_number
+                    for row_number in range(start_row, max_row + 1)
+                    if bool(worksheet_formula.row_dimensions[row_number].hidden)
+                ]
+                data["hidden_columns"] = [
+                    column_number_to_name(column_number)
+                    for column_number in range(start_col, max_col + 1)
+                    if bool(
+                        worksheet_formula.column_dimensions[
+                            column_number_to_name(column_number)
+                        ].hidden
+                    )
+                ]
 
-        if include_object_counts:
-            data["chart_count"] = safe_count(lambda: int(worksheet.api.ChartObjects().Count))
-            data["shape_count"] = safe_count(lambda: int(worksheet.api.Shapes.Count))
+            if include_merged_ranges:
+                merged_ranges = sorted(str(cell_range) for cell_range in worksheet_formula.merged_cells.ranges)
+                data["merged_ranges"] = merged_ranges
+                data["merged_range_count"] = len(merged_ranges)
 
-        return data
+            if include_formula_stats:
+                formula_count = 0
+                nonempty_count = 0
+                for formula_row in worksheet_formula.iter_rows(
+                    min_row=start_row,
+                    max_row=max_row,
+                    min_col=start_col,
+                    max_col=max_col,
+                ):
+                    for formula_cell in formula_row:
+                        if formula_cell.data_type == "f":
+                            formula_count += 1
+                        if formula_cell.value not in (None, ""):
+                            nonempty_count += 1
+                data["formula_count"] = formula_count
+                data["nonempty_cell_count"] = nonempty_count
+
+            if include_object_counts:
+                # Keep Excel-native object counts as an optional live read because
+                # openpyxl does not provide a reliable sheet-level shape inventory.
+                data["chart_count"] = safe_count(lambda: int(worksheet.api.ChartObjects().Count))
+                data["shape_count"] = safe_count(lambda: int(worksheet.api.Shapes.Count))
+
+            return data
+        finally:
+            if workbook_formula is not None:
+                workbook_formula.close()
+            if snapshot_path != Path(session.path):
+                snapshot_path.unlink(missing_ok=True)
 
     def get_range(
         self,
@@ -714,6 +757,38 @@ class ExcelService:
             if snapshot_path != Path(session.path):
                 snapshot_path.unlink(missing_ok=True)
         return trace_model, workbook_name
+
+    def _create_sheet_state_snapshot(self, session: WorkbookSession) -> Path:
+        """Return a workbook path suitable for fast openpyxl-based sheet analysis.
+
+        Parameters:
+            session: The active workbook session whose current state should be read.
+
+        Returns:
+            A workbook path on disk. This is the original file when the session is
+            already saved, otherwise a temporary SaveCopyAs snapshot.
+        """
+        workbook_path = Path(session.path)
+        try:
+            if workbook_path.exists() and bool(session.workbook.api.Saved):
+                return workbook_path
+        except Exception:
+            if workbook_path.exists():
+                return workbook_path
+
+        suffix = workbook_path.suffix or ".xlsx"
+        with tempfile.NamedTemporaryFile(prefix="excel-mcp-sheet-state-", suffix=suffix, delete=False) as handle:
+            snapshot_path = Path(handle.name)
+
+        try:
+            session.workbook.api.SaveCopyAs(str(snapshot_path))
+            return snapshot_path
+        except Exception:
+            snapshot_path.unlink(missing_ok=True)
+
+        if workbook_path.exists():
+            return workbook_path
+        raise ExcelServiceError("Get sheet state could not create a workbook snapshot for analysis.")
 
     def _create_trace_snapshot(self, session: WorkbookSession) -> Path:
         """Create a temporary workbook snapshot for formulas-based tracing.

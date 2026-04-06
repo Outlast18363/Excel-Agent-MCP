@@ -529,6 +529,12 @@ def get_merged_ranges(used_range: Any) -> list[str]:
     Returns:
         A deduplicated list of merged range addresses.
     """
+    try:
+        if not bool(used_range.api.MergeCells):
+            return []
+    except Exception:
+        pass
+
     merged_ranges: set[str] = set()
     for cell in used_range:
         try:
@@ -548,15 +554,24 @@ def get_formula_and_nonempty_counts(target_range: Any) -> tuple[int, int]:
     Returns:
         A tuple of ``(formula_count, nonempty_cell_count)``.
     """
+    rows = int(target_range.rows.count)
+    cols = int(target_range.columns.count)
+    values_matrix = normalize_range_read_matrix(
+        target_range.options(ndim=2, chunksize=10_000).value,
+        rows,
+        cols,
+        "target_range_values",
+    )
+    formulas_matrix = normalize_formula_grid(target_range.formula, rows, cols)
+
     formula_count = 0
     nonempty_count = 0
-    for cell in target_range:
-        value = cell.value
-        formula = cell.formula
-        if value not in (None, ""):
-            nonempty_count += 1
-        if isinstance(formula, str) and formula.startswith("="):
-            formula_count += 1
+    for row_index in range(rows):
+        for col_index in range(cols):
+            if values_matrix[row_index][col_index] not in (None, ""):
+                nonempty_count += 1
+            if formulas_matrix[row_index][col_index] is not None:
+                formula_count += 1
     return formula_count, nonempty_count
 
 

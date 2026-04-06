@@ -69,6 +69,14 @@ class ExcelMcpE2ETests(unittest.TestCase):
         # Write deliberate error formula to C1
         cls.sheet_data.range("C1").formula = "=1/0"
 
+        # Add hidden geometry and one merged area so sheet-state metadata has
+        # stable coverage beyond simple used-range bounds.
+        cls.sheet_data.range("D1").value = "Merged header"
+        cls.sheet_data.range("D1:E1").merge()
+        cls.sheet_data.range("E2").value = "Visible tail"
+        cls.sheet_data.range("5:5").api.Hidden = True
+        cls.sheet_data.range("C:C").api.Hidden = True
+
         # Apply formatting to A1:B1 using xlwings high-level API instead of platform-specific underlying COM/appscript
         header_range = cls.sheet_data.range("A1:B1")
         # Bold text (might need platform specific branching for API, but for Mac we can try the high level first or skip for tests)
@@ -126,9 +134,13 @@ class ExcelMcpE2ETests(unittest.TestCase):
         data = response["data"]
         self.assertEqual(data["sheet"], "Data")
         self.assertEqual(data["max_row"], 10)
-        self.assertEqual(data["max_col"], 3)
+        self.assertEqual(data["max_col"], 5)
         self.assertEqual(data["formula_count"], 11)  # 10 in col B, 1 in col C
-        self.assertEqual(data["nonempty_cell_count"], 20) # 10 in A, 10 in B
+        self.assertEqual(data["nonempty_cell_count"], 23) # 10 in A, 11 formulas, 1 merged header, 1 literal tail
+        self.assertEqual(data["hidden_rows"], [5])
+        self.assertEqual(data["hidden_columns"], ["C"])
+        self.assertEqual(data["merged_ranges"], ["D1:E1"])
+        self.assertEqual(data["merged_range_count"], 1)
 
     def test_03_get_range(self) -> None:
         """Verify the server extracts values, formulas, and formatting correctly."""
