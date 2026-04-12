@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 
 from .service import ExcelServiceError, excel_service
 from .types import McpResponse, error_response, success_response
@@ -15,6 +15,7 @@ from .types import McpResponse, error_response, success_response
 mcp_server = FastMCP("Excel MCP")
 
 McpToolResult = tuple[list[TextContent], McpResponse]
+StructuredOnlyToolResult = Annotated[CallToolResult, McpResponse]
 
 
 def _build_tool_result(payload: McpResponse) -> McpToolResult:
@@ -48,6 +49,46 @@ def _execute_tool(operation: Callable[[], dict[str, Any]]) -> McpToolResult:
         return _build_tool_result(error_response(str(exc)))
     except Exception as exc:  # pragma: no cover - defensive integration guard
         return _build_tool_result(error_response(f"Unexpected server error: {exc}"))
+
+
+def _build_structured_tool_result(
+    payload: McpResponse,
+    *,
+    is_error: bool = False,
+) -> StructuredOnlyToolResult:
+    """Return an MCP result that only populates ``structuredContent``.
+
+    Parameters:
+        payload: The shared response envelope to expose to MCP callers.
+        is_error: Whether the response should be flagged as an MCP error.
+
+    Returns:
+        A ``CallToolResult`` with empty text ``content`` and the payload stored
+        only in ``structuredContent``.
+    """
+
+    return CallToolResult(content=[], structuredContent=payload, isError=is_error)
+
+
+def _execute_structured_tool(operation: Callable[[], dict[str, Any]]) -> StructuredOnlyToolResult:
+    """Run a service-layer operation and emit structured content only.
+
+    Parameters:
+        operation: A zero-argument callable that performs the requested work.
+
+    Returns:
+        A structured-only MCP result for callers that read ``structuredContent``.
+    """
+
+    try:
+        return _build_structured_tool_result(success_response(operation()))
+    except ExcelServiceError as exc:
+        return _build_structured_tool_result(error_response(str(exc)), is_error=True)
+    except Exception as exc:  # pragma: no cover - defensive integration guard
+        return _build_structured_tool_result(
+            error_response(f"Unexpected server error: {exc}"),
+            is_error=True,
+        )
 
 
 @mcp_server.tool()
@@ -163,7 +204,7 @@ def get_range(
     include_geometry: bool = False,
     include_hidden_flags: bool = False,
     include_merged_info: bool = False,
-) -> McpToolResult:
+) -> StructuredOnlyToolResult:
     """Read cell data for an A1 range using dense range-aligned payload fields.
 
     Parameters:
@@ -189,7 +230,7 @@ def get_range(
         fields controlled by the ``include_*`` flags.
     """
 
-    return _execute_tool(
+    return _execute_structured_tool(
         lambda: excel_service.get_range(
             workbook_id=workbook_id,
             sheet=sheet,
@@ -317,7 +358,6 @@ def local_screenshot(
     sheet: str,
     range: str,
     output_path: str | None = None,
-    return_base64: bool = False,
 ) -> McpToolResult:
     """Export a rendered PNG of an Excel range (not a full-screen capture).
 
@@ -328,13 +368,13 @@ def local_screenshot(
         workbook_id: The workbook handle returned by ``open_workbook``.
         sheet: The sheet name containing the target range.
         range: The A1-style address to capture.
-        output_path: Destination path for the PNG file. A temporary file is
-            created when omitted.
-        return_base64: Include base64-encoded PNG bytes in the response as
-            ``base64``.
+        output_path: Destination path for the PNG file. When omitted, the
+            server writes a stable PNG under ``output/spreadsheet/screenshots/``.
 
     Returns:
-        ``sheet``, ``range``, ``image_path``, and optionally ``base64``.
+        ``sheet``, ``range``, and ``image_path`` for the written PNG. Callers
+        should use the returned ``image_path`` instead of requesting inline
+        image bytes.
     """
 
     return _execute_tool(
@@ -343,7 +383,6 @@ def local_screenshot(
             sheet=sheet,
             range_address=range,
             output_path=output_path,
-            return_base64=return_base64,
         )
     )
 

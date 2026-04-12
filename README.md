@@ -250,7 +250,7 @@ claude mcp add --transport stdio excel-mcp -- \
 - `open_workbook` keeps a process-local workbook registry keyed by `workbook_id`.
 - `set_range` applies writes in a stable order and formulas overwrite values when both are supplied.
 - `recalculate` scans only formula-bearing cells for errors.
-- `local_screenshot` relies on xlwings' `Range.to_png()` feature which uses Excel's native export capability.
+- `local_screenshot` relies on xlwings' `Range.to_png()` feature which uses Excel's native export capability and returns a reusable `image_path` instead of inline base64 payloads.
 - `trace_formula` creates a temporary workbook snapshot and analyzes it with `formulas.ExcelModel`.
 - `trace_formula` returns a flat graph using `nodes` and `edges`, and `max_depth=None` performs full transitive expansion.
 - The server never writes logs to `stdout`; logs belong on `stderr` so MCP traffic stays clean.

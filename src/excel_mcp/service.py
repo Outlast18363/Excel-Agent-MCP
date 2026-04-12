@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import io
 import tempfile
@@ -22,6 +21,7 @@ from .helpers import (
     build_style_lookup,
     build_trace_node_payload,
     column_number_to_name,
+    default_screenshot_output_path,
     expand_formulas_ref,
     extract_excel_error,
     format_formulas_ref,
@@ -39,7 +39,6 @@ from .helpers import (
     row_column_to_a1_address,
     safe_count,
     sheet_visible,
-    temporary_screenshot_path,
 )
 from .types import JsonValue
 
@@ -404,13 +403,23 @@ class ExcelService:
         sheet: str,
         range_address: str,
         output_path: str | None = None,
-        return_base64: bool = False,
     ) -> dict[str, JsonValue]:
         target_range = self._get_range(workbook_id=workbook_id, sheet_name=sheet, range_address=range_address)
-        
-        target_path = Path(output_path).expanduser() if output_path else temporary_screenshot_path()
+
+        captured_range = get_address(target_range)
+        # Default to a stable repo-local output path so MCP callers can reuse the
+        # returned image path without relying on ephemeral temp files.
+        target_path = (
+            Path(output_path).expanduser()
+            if output_path
+            else default_screenshot_output_path(
+                workbook_id=workbook_id,
+                sheet=sheet,
+                range_address=captured_range,
+            )
+        )
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Use xlwings native to_png method
         target_range.to_png(str(target_path))
 
@@ -425,12 +434,9 @@ class ExcelService:
 
         data: dict[str, JsonValue] = {
             "sheet": sheet,
-            "range": get_address(target_range),
+            "range": captured_range,
             "image_path": str(target_path),
         }
-
-        if return_base64:
-            data["base64"] = base64.b64encode(target_path.read_bytes()).decode("ascii")
 
         return data
 

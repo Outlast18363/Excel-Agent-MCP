@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import tempfile
+import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -805,11 +805,40 @@ def extract_excel_error(value: Any) -> str | None:
     return None
 
 
-def temporary_screenshot_path() -> Path:
-    """Create a stable temporary PNG path for screenshot output."""
-    file_handle = tempfile.NamedTemporaryFile(prefix="excel-mcp-", suffix=".png", delete=False)
-    file_handle.close()
-    return Path(file_handle.name)
+def _safe_path_component(value: str) -> str:
+    """Normalize user-facing labels into filesystem-safe path components.
+
+    Parameters:
+        value: Arbitrary workbook, sheet, or range text to place in a filename.
+
+    Returns:
+        A compact ASCII-safe filename component that avoids reserved separators.
+    """
+
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._-")
+    return normalized or "item"
+
+
+def default_screenshot_output_path(*, workbook_id: str, sheet: str, range_address: str) -> Path:
+    """Build the default repo-local PNG path for ``local_screenshot`` output.
+
+    Parameters:
+        workbook_id: The MCP workbook handle used to keep filenames stable per session.
+        sheet: The sheet name associated with the rendered range.
+        range_address: The normalized A1-style range written into the screenshot filename.
+
+    Returns:
+        A path rooted under ``output/spreadsheet/screenshots`` inside the repo.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    filename = (
+        "local_screenshot_"
+        f"{_safe_path_component(workbook_id)}_"
+        f"{_safe_path_component(sheet)}_"
+        f"{_safe_path_component(range_address)}.png"
+    )
+    return repo_root / "output" / "spreadsheet" / "screenshots" / filename
 
 
 def _all_scalars(values: list[Any]) -> bool:

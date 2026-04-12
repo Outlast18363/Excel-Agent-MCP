@@ -9,6 +9,7 @@ from excel_mcp.helpers import (
     ExcelServiceError,
     build_trace_node_payload,
     column_number_to_name,
+    default_screenshot_output_path,
     expand_formulas_ref,
     format_formulas_ref,
     hex_to_rgb_tuple,
@@ -109,6 +110,31 @@ class HelperTests(unittest.TestCase):
         """
 
         self.assertEqual(hex_to_rgb_tuple("#123ABC"), (18, 58, 188))
+
+    def test_default_screenshot_output_path_uses_repo_output_directory(self) -> None:
+        """Verify screenshot defaults land under the repo output directory.
+
+        Parameters:
+            None.
+
+        Returns:
+            ``None``. Assertions validate the default artifact path shape.
+        """
+
+        path = default_screenshot_output_path(
+            workbook_id="wb:001",
+            sheet="Five Year Review",
+            range_address="A1:G40",
+        )
+
+        self.assertEqual(path.suffix, ".png")
+        self.assertEqual(path.parent.name, "screenshots")
+        self.assertEqual(path.parent.parent.name, "spreadsheet")
+        self.assertEqual(path.parent.parent.parent.name, "output")
+        self.assertEqual(
+            path.name,
+            "local_screenshot_wb_001_Five_Year_Review_A1_G40.png",
+        )
 
     def test_normalize_matrix_input_wraps_single_cell_scalar(self) -> None:
         """Verify a scalar write payload is accepted for a single-cell target.
