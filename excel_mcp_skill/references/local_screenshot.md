@@ -23,7 +23,6 @@ Use when you need a visual snapshot of how Excel displays a range (formatting, b
 
 ## Notes
 
-- Implementation uses xlwings `Range.to_png(...)`. The raw export is RGBA with a transparent background for unfilled cells; the service composites onto white and converts to RGB so every pixel is fully opaque.
 - If `output_path` is omitted, use the returned `image_path` under `output/spreadsheet/screenshots/` rather than expecting inline image bytes.
 - This captures only the specified Excel range, not the entire monitor or window.
 
