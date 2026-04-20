@@ -12,7 +12,7 @@ Call this before any other workbook-scoped tool. Subsequent calls pass the retur
 
 - `path` (`str`, required) — Filesystem path to the workbook; resolved to an absolute path internally.
 - `read_only` (`bool`, default `False`) — Open without allowing edits.
-- `visible` (`bool`, default `True`) — Whether the managed Excel window is shown.
+- `visible` (`bool`, default `False`) — Whether the managed Excel window is shown.
 - `create_if_missing` (`bool`, default `False`) — If the file is missing, create a new workbook, save it at `path`, and create parent directories as needed.
 
 ## Response `data` fields

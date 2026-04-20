@@ -70,7 +70,7 @@ class ExcelService:
         *,
         path: str,
         read_only: bool = False,
-        visible: bool = True,
+        visible: bool = False,
         create_if_missing: bool = False,
     ) -> dict[str, JsonValue]:
         xw = self._require_xlwings()

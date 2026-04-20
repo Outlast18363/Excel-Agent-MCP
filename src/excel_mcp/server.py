@@ -95,7 +95,7 @@ def _execute_structured_tool(operation: Callable[[], dict[str, Any]]) -> Structu
 def open_workbook(
     path: str,
     read_only: bool = False,
-    visible: bool = True,
+    visible: bool = False,
     create_if_missing: bool = False,
 ) -> McpToolResult:
     """Open a live Excel workbook and return a session ``workbook_id`` for all later calls.
