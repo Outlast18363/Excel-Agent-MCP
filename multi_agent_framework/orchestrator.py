@@ -26,13 +26,17 @@ class RunResult:
     reset_count: int
     trace_path: Path
     run_dir: Path
+    final_dir: Path
+    # Per-agent cumulative token usage (collected from turn.completed events).
+    usage_by_agent: dict = None  # type: ignore[assignment]
 
 
 class Orchestrator:
-    def __init__(self, task: str, workbook: Path, run_dir: Path):
+    def __init__(self, task: str, workbook: Path, run_dir: Path, task_id: str):
         self.task = task
         self.workbook = Path(workbook).resolve()
         self.run_dir = Path(run_dir).resolve()
+        self.task_id = task_id
 
         self.handover = self.run_dir / "handover" # where handover docs are stored
         self.handover.mkdir(parents=True, exist_ok=True)
@@ -43,6 +47,27 @@ class Orchestrator:
 
         self.snapshot_path = self.run_dir / "snapshot.xlsx"
         self.trace_path = self.run_dir / "trace.jsonl"
+
+        # final_result/ is the orchestrator-owned deliverable surface. The
+        # workbook-copy name carries a `{task_id}_` signature so any copy in
+        # this folder that does NOT match that prefix is provably not ours
+        # (e.g. a rogue Executor copy would stand out in logs).
+        self.final_dir = self.run_dir / "final_result"
+        self.final_dir.mkdir(parents=True, exist_ok=True)
+        self.final_workbook = self.final_dir / f"{task_id}_final_result{self.workbook.suffix}"
+
+    def _wipe_final_dir(self) -> None:
+        """Remove everything inside final_dir without deleting the folder itself.
+
+        Called at the top of every loop iteration so stale non-xlsx reports
+        (from a prior Executor run) and the prior workbook copy never leak
+        into the next Evaluator pass. Idempotent when the folder is empty.
+        """
+        for p in self.final_dir.iterdir():
+            if p.is_file() or p.is_symlink():
+                p.unlink()
+            else:
+                shutil.rmtree(p)
 
     def run(self) -> RunResult:
         with EventBus(self.trace_path) as bus:
@@ -68,6 +93,12 @@ class Orchestrator:
             prev_agent = "Planner"
 
             while True:
+                # Wipe final_result/ at the top of every iteration (initial,
+                # redo, reset). Single invariant: the Evaluator only ever sees
+                # artifacts produced by *this* iteration.
+                self._wipe_final_dir()
+                bus.emit("ORCHESTRATOR", {"type": "final_output_dir_wipe", "iter": iter_idx})
+
                 # ---- Executor ----
                 reason = "reset-retry" if reset_mode else ("redo" if iter_idx > 0 else "execute")
                 bus.transition(prev_agent, "Executor", iter_idx, reason)
@@ -82,18 +113,30 @@ class Orchestrator:
                     task=self.task,
                     plan_path=self.plan_path,
                     workbook=self.workbook,
+                    final_dir=self.final_dir,
                     impl_path=self.impl_path,
                     impl_path_or_none=self.impl_path if has_prior_impl else None,
                     eval_path_or_none=self.eval_path if has_prior_eval else None,
                     hint_path_or_none=self.hint_path if has_prior_hint else None,
                 )
 
+                # Orchestrator publishes the workbook copy unconditionally
+                # *after* the Executor returns. This removes any redo-staleness
+                # risk: even if the Executor only edited the workbook (no
+                # standalone report), the Evaluator still sees a fresh copy.
+                shutil.copy2(self.workbook, self.final_workbook)
+                bus.emit("ORCHESTRATOR", {
+                    "type": "final_workbook_copy",
+                    "path": str(self.final_workbook),
+                })
+
                 # ---- Evaluator ----
                 bus.transition("Executor", "Evaluator", iter_idx, "evaluate")
                 _, verdict = evaluator.run(
                     plan_path=self.plan_path,
                     impl_path=self.impl_path,
-                    workbook=self.workbook,
+                    workbook=self.final_workbook,
+                    final_dir=self.final_dir,
                     eval_path=self.eval_path,
                     task=self.task
                 )
@@ -103,7 +146,11 @@ class Orchestrator:
                 prev_agent = "Evaluator"
 
                 if verdict == "success":
-                    return RunResult("success", iter_idx, redo_count, reset_count, self.trace_path, self.run_dir)
+                    return RunResult(
+                        "success", iter_idx, redo_count, reset_count,
+                        self.trace_path, self.run_dir, self.final_dir,
+                        dict(bus.usage_by_agent),
+                    )
 
                 # Decide redo vs reset. A `redo` verdict only escalates to reset
                 # once the redo cap is exhausted; a `reset` verdict goes straight there.
@@ -114,7 +161,11 @@ class Orchestrator:
 
                 # Reset path (verdict=="reset", or verdict=="redo" with cap hit).
                 if reset_count >= MAX_RESET:
-                    return RunResult("fail", iter_idx, redo_count, reset_count, self.trace_path, self.run_dir)
+                    return RunResult(
+                        "fail", iter_idx, redo_count, reset_count,
+                        self.trace_path, self.run_dir, self.final_dir,
+                        dict(bus.usage_by_agent),
+                    )
 
                 # Distill BEFORE rollback: the Distiller reads eval_report.md while
                 # it still describes the about-to-be-reverted state. Rollback and

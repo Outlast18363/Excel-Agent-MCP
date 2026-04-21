@@ -43,6 +43,18 @@ python -m multi_agent_framework.runner \
     --run-dir trace_logs/run_demo
 ```
 
+Optional: supply `--task-id` to stamp the orchestrator-published workbook
+copy inside `final_result/` with a meaningful signature (e.g. a Finch
+dataset id). If omitted, the `--run-dir` basename is used.
+
+```bash
+python -m multi_agent_framework.runner \
+    --task "..." \
+    --workbook /absolute/path/to/book.xlsx \
+    --run-dir trace_logs/run_demo \
+    --task-id finch_0042
+```
+
 On exit, `runner.py` prints a JSON summary to stdout, for example:
 
 ```json
@@ -54,7 +66,8 @@ On exit, `runner.py` prints a JSON summary to stdout, for example:
   "max_redo": 3,
   "max_reset": 1,
   "trace": "/abs/.../trace_logs/run_20260420_143000/trace.jsonl",
-  "run_dir": "/abs/.../trace_logs/run_20260420_143000"
+  "run_dir": "/abs/.../trace_logs/run_20260420_143000",
+  "final_dir": "/abs/.../trace_logs/run_20260420_143000/final_result"
 }
 ```
 
@@ -66,21 +79,50 @@ workbook path does not exist.
 ## 3. How the loop works
 
 ```
-Planner  ──► [snapshot.xlsx taken]  ──►  Executor ──► Evaluator ──► verdict
-                                            ▲                           │
-                                            │                           │
-                                            └───── redo (in place) ◄────┤
-                                                                        │
-                                     reset (restore snapshot, retry) ◄──┘
+Planner ──► [snapshot.xlsx]
+                │
+                ▼
+        ┌─────────────────────────────────────────────────────────────┐
+        │ each iteration:                                             │
+        │   1. Orchestrator wipes final_result/                       │
+        │   2. Executor edits --workbook in place; writes any         │
+        │      non-xlsx deliverable into final_result/                │
+        │   3. Orchestrator copies --workbook to                      │
+        │      final_result/{task_id}_final_result.xlsx               │
+        │   4. Evaluator scans final_result/ (non-xlsx if present is  │
+        │      the deliverable; else the workbook copy is)            │
+        └─────────────────────────────────────────────────────────────┘
+                │
+                ▼
+            verdict
+              ├─ success ──► done
+              ├─ redo    ──► next iteration (workbook kept)
+              └─ reset   ──► restore snapshot + delete impl_report.md
+                             ──► next iteration
 ```
 
 - **Planner** runs exactly once. It only *reads* the workbook (inspection
   tools only) and writes `plan.md`.
 - **Snapshot**: after the plan is written, the orchestrator copies the
   workbook to `snapshot.xlsx` so a `reset` verdict can roll changes back.
+- **`final_result/` wipe**: the orchestrator empties this folder at the
+  top of every iteration (initial, redo, and reset) so the Evaluator can
+  never see a stale workbook copy or a stale non-xlsx report.
 - **Executor** mutates the workbook in place and writes `impl_report.md`.
-- **Evaluator** inspects the result, writes `eval_report.md`, and ends its
-  final message with exactly one of:
+  If the task calls for a non-Excel deliverable (`.txt`, `.md`, `.pdf`,
+  `.docx`, `.csv`, …), the Executor writes it *directly* into
+  `final_result/`. The Executor is explicitly forbidden from copying the
+  workbook itself — that is the orchestrator's job.
+- **Workbook publication**: as soon as the Executor returns, the
+  orchestrator unconditionally copies `--workbook` to
+  `final_result/{task_id}_final_result.xlsx`. The `{task_id}_` prefix is
+  a signature: any workbook copy in `final_result/` that does not match
+  that name was not produced by the orchestrator.
+- **Evaluator** scans `final_result/` and applies a priority rule: if any
+  non-xlsx file is present, that file is the primary deliverable and the
+  workbook copy is supporting context; otherwise the workbook copy is
+  itself the deliverable. It writes `eval_report.md` and ends its final
+  message with exactly one of:
   - `<verdict>success</verdict>` — done.
   - `<verdict>redo</verdict>` — re-run Executor with the eval report in hand.
   - `<verdict>reset</verdict>` — restore snapshot, delete the stale
@@ -108,22 +150,47 @@ Inside `<run_dir>/`:
 |---|---|---|
 | **Event bus JSONL** (every event from every agent + orchestrator transitions/verdicts) | `<run_dir>/trace.jsonl` | `EventBus` (`event_bus.py`) |
 | **Pre-mutation snapshot** of the workbook (used for `reset`) | `<run_dir>/snapshot.xlsx` | `Orchestrator` (copied right after Planner finishes) |
+| **Final deliverable folder** (wiped at the top of each iteration) | `<run_dir>/final_result/` | `Orchestrator.__init__` |
+| ├─ Published workbook copy (the signed deliverable) | `<run_dir>/final_result/{task_id}_final_result.xlsx` | Orchestrator — re-copied from `--workbook` after every Executor run |
+| └─ Standalone report (optional, when the task asks for one) | `<run_dir>/final_result/<name>.{txt,md,pdf,docx,csv,…}` | Executor — written directly into `final_result/` |
 | **Handover directory** (shared docs between agents) | `<run_dir>/handover/` | `Orchestrator.__init__` |
 | ├─ Plan (Markdown) | `<run_dir>/handover/plan.md` | Planner |
 | ├─ Implementation report (Markdown) | `<run_dir>/handover/impl_report.md` | Executor — deleted on `reset` |
 | └─ Evaluation report (Markdown) | `<run_dir>/handover/eval_report.md` | Evaluator |
 
-### Final output workbook
+### Final output: `final_result/`
 
-There is **no separate output file**. The Executor edits the workbook you
-pass with `--workbook` **in place**. After a successful run:
+`<run_dir>/final_result/` is the **authoritative deliverable surface** of
+a run. Its contract:
 
-- The authoritative result is your original `--workbook` path.
-- `<run_dir>/snapshot.xlsx` preserves the pre-run state if you need to diff
-  or recover.
+- **Per-iteration wipe.** The orchestrator empties this folder at the top
+  of every iteration (initial, redo, and reset). No file ever carries
+  over from a prior iteration, so the Evaluator only ever sees artifacts
+  produced by the current Executor pass.
+- **Workbook publication is orchestrator-only.** After every Executor
+  run, the orchestrator copies `--workbook` to
+  `final_result/{task_id}_final_result.xlsx`. `{task_id}_` is a
+  signature: any `*.xlsx` inside `final_result/` that does not start
+  with that prefix was **not** produced by the orchestrator and is
+  almost certainly a bug (the Executor prompt explicitly forbids
+  copying the workbook itself).
+- **Non-xlsx deliverables are Executor-owned.** When the task calls for
+  a `.txt`/`.md`/`.pdf`/`.docx`/`.csv`/… report, the Executor writes it
+  *directly* into `final_result/`. Anything it leaves elsewhere is
+  invisible to the Evaluator.
+- **Evaluator priority rule.** If any non-xlsx file is present in
+  `final_result/`, that file is the primary deliverable and the
+  workbook copy is supporting context. Otherwise the workbook copy is
+  the deliverable.
+
+`--workbook` is still the single **edit** target and the snapshot /
+rollback pivot — nothing in the `final_result/` flow mutates it.
+`<run_dir>/snapshot.xlsx` remains the rollback source on `reset`.
 
 > If you want to keep the original untouched, copy it yourself before
-> invoking the runner and pass the copy as `--workbook`.
+> invoking the runner and pass the copy as `--workbook` — the
+> orchestrator will still publish its own signed copy into
+> `final_result/`.
 
 ### Summary JSON
 
@@ -188,13 +255,14 @@ result = Orchestrator(
     task="Add a pivot summary sheet…",
     workbook=Path("/abs/path/to/book.xlsx"),
     run_dir=Path("trace_logs/run_demo"),
+    task_id="finch_0042",
 ).run()
 
 print(result.verdict, result.iterations, result.trace_path)
 ```
 
 `RunResult` fields: `verdict`, `iterations`, `redo_count`, `reset_count`,
-`trace_path`, `run_dir`.
+`trace_path`, `run_dir`, `final_dir`.
 
 ---
 

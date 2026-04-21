@@ -14,12 +14,25 @@ class EventBus:
         self.path = Path(jsonl_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = self.path.open("a", encoding="utf-8")
+        # Per-agent token totals, accumulated from `turn.completed` events as
+        # they flow through emit(). Pulled by the orchestrator at end-of-run.
+        self.usage_by_agent: dict[str, dict[str, int]] = {}
 
     def emit(self, agent: str, event: dict[str, Any]) -> None:
         """Write one agent-labeled JSON line and flush immediately."""
         record = {"agent": agent, **event}
-        self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        # Trailing "\n\n\n" = the record's own newline + two blank lines, so
+        # events in trace.jsonl are visually separated when read by humans.
+        # Standard JSONL parsers skip blank lines, so this stays compatible.
+        self._fh.write(json.dumps(record, ensure_ascii=False) + "\n\n\n")
         self._fh.flush()
+        if event.get("type") == "turn.completed":
+            usage = event.get("usage") or {}
+            acc = self.usage_by_agent.setdefault(
+                agent, {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+            )
+            for k in acc:
+                acc[k] += int(usage.get(k, 0) or 0)
 
     def transition(self, from_agent: str | None, to_agent: str, iter_idx: int, reason: str) -> None:
         self.emit("ORCHESTRATOR", {

@@ -29,20 +29,31 @@ class BaseAgent:
 
     def _stream(self, prompt: str) -> str:
         """Spawn codex, stream JSON events through the bus, return last agent_message text."""
-        cmd = build_codex_cmd(self.ROLE, prompt, self.workspace)
-        # stdin=DEVNULL so the CLI doesn't block waiting on an interactive TTY.
+        cmd = build_codex_cmd(self.ROLE, self.workspace)
+        # The cmd ends with `-`, so codex reads the prompt from stdin. Piping
+        # (rather than passing the prompt as an argv string) matches the
+        # raw_api_baseline pattern and avoids Windows argv size/encoding issues
+        # when Finch task descriptions are long.
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+            stdin=subprocess.PIPE,
+            bufsize=0,
         )
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(prompt.encode("utf-8"))
+        except BrokenPipeError:
+            pass
+        finally:
+            proc.stdin.close()
         final_msg = ""
         assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip("\n")
+        # Decode the child's bytes ourselves so Windows locale defaults never
+        # leak into TextIOWrapper and crash the stream loop.
+        for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
             if not line:
                 continue
             try:
@@ -56,7 +67,10 @@ class BaseAgent:
             # said last is what callers care about (verdict tag, handover note, …).
             if event.get("type") == "item.completed":
                 item = event.get("item", {}) or {}
-                if item.get("item_type") == "agent_message":
+                # Codex CLI nests the item kind under "type" (not "item_type");
+                # using the wrong key here silently drops every agent_message
+                # and breaks the Evaluator's verdict detection.
+                if item.get("type") == "agent_message":
                     final_msg = item.get("text", final_msg)
         proc.wait()
         return final_msg
@@ -104,6 +118,7 @@ class ExecutorAgent(BaseAgent):
         task: str,
         plan_path: Path,
         workbook: Path,
+        final_dir: Path,
         impl_path: Path,
         impl_path_or_none: Path | None,
         eval_path_or_none: Path | None,
@@ -121,6 +136,12 @@ Prior evaluation report (may be None): {eval_path_or_none}
 Prior error hint (may be None): {hint_path_or_none}
 Workbook to modify: {workbook}
 
+Final deliverable folder: {final_dir}
+
+Do not copy or export the workbook into {final_dir} — the system
+copies it for you. If the task requires a non-Excel deliverable (e.g.
+.txt / .md / .pdf / .docx / .csv), write it directly into {final_dir}.
+
 Write a concise and structured implementation report (what you changed, where, and why) to:
 {impl_path}
 """
@@ -130,6 +151,7 @@ Write a concise and structured implementation report (what you changed, where, a
         task: str,
         plan_path: Path,
         workbook: Path,
+        final_dir: Path,
         impl_path: Path,
         impl_path_or_none: Path | None,
         eval_path_or_none: Path | None,
@@ -147,6 +169,7 @@ Write a concise and structured implementation report (what you changed, where, a
             task=task,
             plan_path=plan_path,
             workbook=workbook,
+            final_dir=final_dir,
             impl_path=impl_path,
             impl_path_or_none=impl_path_or_none,
             eval_path_or_none=eval_path_or_none,
@@ -162,7 +185,15 @@ class EvaluatorAgent(BaseAgent):
     # fresh context window) when its final message is missing a verdict tag.
     MAX_VERDICT_RETRY = 2
 
-    def build_prompt(self, plan_path: Path, impl_path: Path, workbook: Path, eval_path: Path, task: Path) -> str:
+    def build_prompt(
+        self,
+        plan_path: Path,
+        impl_path: Path,
+        workbook: Path,
+        final_dir: Path,
+        eval_path: Path,
+        task: Path,
+    ) -> str:
         return f"""\
 You are the EVALUATOR. You verify the Executor's work against the plan using mcp
 inspection tools and trace_formula. You do not modify the workbook.
@@ -170,9 +201,15 @@ inspection tools and trace_formula. You do not modify the workbook.
 Task: {task}
 Plan file: {plan_path}
 Implementation report: {impl_path}
-Workbook: {workbook}
 
-Write a Markdown evaluation report (findings, pass/fail per plan step, your verdict in one word) to: {eval_path}
+Final deliverable folder: {final_dir}
+Workbook copy (published by orchestrator, inside {final_dir}): {workbook}
+
+Inspect the workbook copy against the Planner's expectation checks; if
+{final_dir} also contains a non-xlsx file, inspect that deliverable too
+and treat it as the primary answer (workbook is supporting context).
+
+Write a Markdown evaluation report (findings, pass/fail per plan step, your verdict in one word: redo, reset, or success) to: {eval_path}
 
 Evaluation report example:
 ---
@@ -209,6 +246,7 @@ exactly one verdict tag on its own:
         plan_path: Path,
         impl_path: Path,
         workbook: Path,
+        final_dir: Path,
         eval_path: Path,
         task: Path,
     ) -> tuple[str, str]:
@@ -216,6 +254,7 @@ exactly one verdict tag on its own:
             plan_path=plan_path,
             impl_path=impl_path,
             workbook=workbook,
+            final_dir=final_dir,
             eval_path=eval_path,
             task=task
         )
