@@ -30,6 +30,7 @@ from .helpers import (
     get_merged_ranges,
     get_range_geometry,
     normalize_matrix_input,
+    normalize_formula_query,
     normalize_formula_grid,
     normalize_number_format_value,
     normalize_number_format_grid,
@@ -198,6 +199,109 @@ class ExcelService:
         finally:
             if workbook_formula is not None:
                 workbook_formula.close()
+            if snapshot_path != Path(session.path):
+                snapshot_path.unlink(missing_ok=True)
+
+    def search_cell(
+        self,
+        *,
+        workbook_id: str,
+        query: str | int | float,
+        sheet: str | None = None,
+        limit: int = 10,
+        match_formulas: bool = True,
+    ) -> dict[str, JsonValue]:
+        session = self._get_workbook_session(workbook_id)
+        normalized_limit = self._normalize_search_limit(limit)
+        scope = "sheet" if sheet is not None else "workbook"
+        target_sheets = [self._get_sheet(workbook_id=workbook_id, sheet_name=sheet).name] if sheet else None
+        kind, prepared_query = self._prepare_search_query(query)
+        snapshot_path = self._create_sheet_state_snapshot(session)
+        workbook_formula = None
+        workbook_values = None
+
+        try:
+            workbook_formula = load_workbook(
+                snapshot_path,
+                read_only=False,
+                data_only=False,
+                keep_links=False,
+            )
+            workbook_values = load_workbook(
+                snapshot_path,
+                read_only=False,
+                data_only=True,
+                keep_links=False,
+            )
+
+            matches: list[str] = []
+            truncated = False
+            for sheet_name in target_sheets or workbook_formula.sheetnames:
+                worksheet_formula = workbook_formula[sheet_name]
+                worksheet_values = workbook_values[sheet_name]
+                used_range = worksheet_formula.calculate_dimension()
+                start_col, start_row, max_col, max_row = range_boundaries(used_range)
+
+                for row_number, (formula_row, value_row) in enumerate(
+                    zip(
+                        worksheet_formula.iter_rows(
+                            min_row=start_row,
+                            max_row=max_row,
+                            min_col=start_col,
+                            max_col=max_col,
+                        ),
+                        worksheet_values.iter_rows(
+                            min_row=start_row,
+                            max_row=max_row,
+                            min_col=start_col,
+                            max_col=max_col,
+                        ),
+                    ),
+                    start=start_row,
+                ):
+                    for col_number, (formula_cell, value_cell) in enumerate(
+                        zip(formula_row, value_row),
+                        start=start_col,
+                    ):
+                        if not self._search_cell_matches(
+                            kind=kind,
+                            prepared_query=prepared_query,
+                            value=value_cell.value,
+                            formula=formula_cell.value if formula_cell.data_type == "f" else None,
+                            match_formulas=match_formulas,
+                        ):
+                            continue
+
+                        if len(matches) >= normalized_limit:
+                            truncated = True
+                            break
+
+                        address = row_column_to_a1_address(row_number, col_number)
+                        matches.append(
+                            address if scope == "sheet" else f"{worksheet_formula.title}!{address}"
+                        )
+                    if truncated:
+                        break
+                if truncated:
+                    break
+
+            data: dict[str, JsonValue] = {
+                "query": query,
+                "kind": kind,
+                "scope": scope,
+                "limit": normalized_limit,
+                "count": len(matches),
+                "truncated": truncated,
+                "matches": matches,
+            }
+            if scope == "sheet":
+                data["sheet"] = target_sheets[0]
+            return data
+        finally:
+            if workbook_formula is not None:
+                workbook_formula.close()
+            if workbook_values is not None:
+                workbook_values.close()
             if snapshot_path != Path(session.path):
                 snapshot_path.unlink(missing_ok=True)
 
@@ -709,6 +813,49 @@ class ExcelService:
                 raise ExcelServiceError("`range` is required when scope is `range`.")
             return [self._get_range(workbook_id=workbook_id, sheet_name=sheet, range_address=range_address)]
         raise ExcelServiceError("`scope` must be one of `workbook`, `sheet`, or `range`.")
+
+    def _normalize_search_limit(self, limit: int) -> int:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ExcelServiceError("`limit` must be a positive integer.")
+        return limit
+
+    def _prepare_search_query(self, query: str | int | float) -> tuple[str, str | int | float]:
+        if isinstance(query, bool):
+            raise ExcelServiceError("`query` must be a string, int, or float.")
+        if isinstance(query, (int, float)):
+            return "number", query
+        if not isinstance(query, str):
+            raise ExcelServiceError("`query` must be a string, int, or float.")
+        if query.startswith("="):
+            return "formula", normalize_formula_query(query)
+        return "text", query.lower()
+
+    def _search_cell_matches(
+        self,
+        *,
+        kind: str,
+        prepared_query: str | int | float,
+        value: Any,
+        formula: Any,
+        match_formulas: bool,
+    ) -> bool:
+        if kind == "number":
+            return self._search_number_matches(value=value, query=prepared_query)
+
+        if value not in (None, "") and kind == "text" and prepared_query in str(value).lower():
+            return True
+        if not isinstance(formula, str):
+            return False
+        if kind == "formula":
+            return prepared_query in normalize_formula_query(formula)
+        if kind == "text" and match_formulas:
+            return prepared_query in formula.lower()
+        return False
+
+    def _search_number_matches(self, *, value: Any, query: str | int | float) -> bool:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        return abs(float(value) - float(query)) <= 1e-12
 
     def _normalize_trace_direction(self, direction: str) -> str:
         """Validate and normalize the requested trace direction.

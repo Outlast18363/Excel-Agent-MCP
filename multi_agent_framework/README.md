@@ -31,7 +31,7 @@ cd /Users/jz/dev_space/codex_agent_test
 
 python -m multi_agent_framework.runner \
     --task "Add a pivot summary sheet that totals revenue by region." \
-    --workbook /absolute/path/to/book.xlsx
+    --workbooks /absolute/path/to/book.xlsx
 ```
 
 Optional: pin the run directory (otherwise one is auto-generated, see §4):
@@ -39,7 +39,7 @@ Optional: pin the run directory (otherwise one is auto-generated, see §4):
 ```bash
 python -m multi_agent_framework.runner \
     --task "..." \
-    --workbook /absolute/path/to/book.xlsx \
+    --workbooks /absolute/path/to/book.xlsx /absolute/path/to/supporting.pdf \
     --run-dir trace_logs/run_demo
 ```
 
@@ -50,7 +50,7 @@ dataset id). If omitted, the `--run-dir` basename is used.
 ```bash
 python -m multi_agent_framework.runner \
     --task "..." \
-    --workbook /absolute/path/to/book.xlsx \
+    --workbooks /absolute/path/to/book.xlsx /absolute/path/to/supporting.pdf \
     --run-dir trace_logs/run_demo \
     --task-id finch_0042
 ```
@@ -71,23 +71,23 @@ On exit, `runner.py` prints a JSON summary to stdout, for example:
 }
 ```
 
-Exit code is `0` on `verdict=="success"`, `1` otherwise, and `2` if the
-workbook path does not exist.
+Exit code is `0` on `verdict=="success"`, `1` otherwise, and `2` if any
+path passed to `--workbooks` does not exist.
 
 ---
 
 ## 3. How the loop works
 
 ```
-Planner ──► [snapshot.xlsx]
+Planner ──► [snapshots/]
                 │
                 ▼
         ┌─────────────────────────────────────────────────────────────┐
         │ each iteration:                                             │
         │   1. Orchestrator wipes final_result/                       │
-        │   2. Executor edits --workbook in place; writes any         │
-        │      non-xlsx deliverable into final_result/                │
-        │   3. Orchestrator copies --workbook to                      │
+        │   2. Executor edits the primary .xlsx in workbook/; writes  │
+        │      any non-xlsx deliverable into final_result/            │
+        │   3. Orchestrator copies the primary .xlsx to               │
         │      final_result/{task_id}_final_result.xlsx               │
         │   4. Evaluator scans final_result/ (non-xlsx if present is  │
         │      the deliverable; else the workbook copy is)            │
@@ -95,26 +95,30 @@ Planner ──► [snapshot.xlsx]
                 │
                 ▼
             verdict
-              ├─ success ──► done
+              ├─ success ──► copy workbook/ to final_result/workbook/ ──► done
               ├─ redo    ──► next iteration (workbook kept)
-              └─ reset   ──► restore snapshot + delete impl_report.md
-                             ──► next iteration
+              └─ reset   ──► restore workbook/ from snapshots/ +
+                             delete impl_report.md ──► next iteration
 ```
 
-- **Planner** runs exactly once. It only *reads* the workbook (inspection
-  tools only) and writes `plan.md`.
-- **Snapshot**: after the plan is written, the orchestrator copies the
-  workbook to `snapshot.xlsx` so a `reset` verdict can roll changes back.
+- **Planner** runs exactly once. It only *reads* the primary workbook
+  (inspection tools only), can see the full staged `workbook/` folder for
+  auxiliary task files, and writes `plan.md`.
+- **Snapshots**: before the Planner runs, the orchestrator copies every
+  staged task file from `workbook/` into `snapshots/` so a `reset` verdict
+  can roll the full folder back.
 - **`final_result/` wipe**: the orchestrator empties this folder at the
   top of every iteration (initial, redo, and reset) so the Evaluator can
   never see a stale workbook copy or a stale non-xlsx report.
-- **Executor** mutates the workbook in place and writes `impl_report.md`.
-  If the task calls for a non-Excel deliverable (`.txt`, `.md`, `.pdf`,
-  `.docx`, `.csv`, …), the Executor writes it *directly* into
-  `final_result/`. The Executor is explicitly forbidden from copying the
-  workbook itself — that is the orchestrator's job.
+- **Executor** mutates the primary `.xlsx` in place and writes
+  `impl_report.md`. It also receives the staged `workbook/` folder path, so
+  supporting PDFs / screenshots / secondary workbooks remain directly
+  accessible during execution. If the task calls for a non-Excel deliverable
+  (`.txt`, `.md`, `.pdf`, `.docx`, `.csv`, …), the Executor writes it
+  *directly* into `final_result/`. The Executor is explicitly forbidden from
+  copying the workbook itself — that is the orchestrator's job.
 - **Workbook publication**: as soon as the Executor returns, the
-  orchestrator unconditionally copies `--workbook` to
+  orchestrator unconditionally copies the primary workbook to
   `final_result/{task_id}_final_result.xlsx`. The `{task_id}_` prefix is
   a signature: any workbook copy in `final_result/` that does not match
   that name was not produced by the orchestrator.
@@ -125,8 +129,12 @@ Planner ──► [snapshot.xlsx]
   message with exactly one of:
   - `<verdict>success</verdict>` — done.
   - `<verdict>redo</verdict>` — re-run Executor with the eval report in hand.
-  - `<verdict>reset</verdict>` — restore snapshot, delete the stale
+  - `<verdict>reset</verdict>` — restore `workbook/` from `snapshots/`, delete the stale
     `impl_report.md`, run Executor fresh.
+- **Success archival copy**: after the Evaluator returns `success`, the
+  orchestrator copies the full staged `workbook/` folder into
+  `final_result/workbook/` so the final output bundle includes all task
+  inputs alongside the signed primary workbook copy.
 - **Loop caps** (see `orchestrator.py`):
   - `MAX_REDO = 3` — successive in-place fixes before escalating to reset.
   - `MAX_RESET = 1` — how many times the workbook may be rolled back.
@@ -149,9 +157,11 @@ Inside `<run_dir>/`:
 | Artifact | Path | Produced by |
 |---|---|---|
 | **Event bus JSONL** (every event from every agent + orchestrator transitions/verdicts) | `<run_dir>/trace.jsonl` | `EventBus` (`event_bus.py`) |
-| **Pre-mutation snapshot** of the workbook (used for `reset`) | `<run_dir>/snapshot.xlsx` | `Orchestrator` (copied right after Planner finishes) |
+| **Staged task files** | `<run_dir>/workbook/` | Wrapper / caller (the orchestrator restores this folder on `reset`) |
+| **Pre-mutation snapshots** of the staged task files (used for `reset`) | `<run_dir>/snapshots/` | `Orchestrator` (copied before Planner starts) |
 | **Final deliverable folder** (wiped at the top of each iteration) | `<run_dir>/final_result/` | `Orchestrator.__init__` |
-| ├─ Published workbook copy (the signed deliverable) | `<run_dir>/final_result/{task_id}_final_result.xlsx` | Orchestrator — re-copied from `--workbook` after every Executor run |
+| ├─ Published workbook copy (the signed deliverable) | `<run_dir>/final_result/{task_id}_final_result.xlsx` | Orchestrator — re-copied from the primary `.xlsx` after every Executor run |
+| ├─ Archived staged workbook folder (success only) | `<run_dir>/final_result/workbook/` | Orchestrator — copied from `<run_dir>/workbook/` after `success` |
 | └─ Standalone report (optional, when the task asks for one) | `<run_dir>/final_result/<name>.{txt,md,pdf,docx,csv,…}` | Executor — written directly into `final_result/` |
 | **Handover directory** (shared docs between agents) | `<run_dir>/handover/` | `Orchestrator.__init__` |
 | ├─ Plan (Markdown) | `<run_dir>/handover/plan.md` | Planner |
@@ -168,12 +178,17 @@ a run. Its contract:
   over from a prior iteration, so the Evaluator only ever sees artifacts
   produced by the current Executor pass.
 - **Workbook publication is orchestrator-only.** After every Executor
-  run, the orchestrator copies `--workbook` to
+  run, the orchestrator copies the primary `.xlsx` from `workbook/` to
   `final_result/{task_id}_final_result.xlsx`. `{task_id}_` is a
   signature: any `*.xlsx` inside `final_result/` that does not start
   with that prefix was **not** produced by the orchestrator and is
   almost certainly a bug (the Executor prompt explicitly forbids
   copying the workbook itself).
+- **Success folder archival is orchestrator-only.** After a `success`
+  verdict, the orchestrator also copies the full staged `workbook/`
+  folder into `final_result/workbook/`. This happens only after
+  evaluation completes successfully, so the Evaluator never depends on
+  that folder being present.
 - **Non-xlsx deliverables are Executor-owned.** When the task calls for
   a `.txt`/`.md`/`.pdf`/`.docx`/`.csv`/… report, the Executor writes it
   *directly* into `final_result/`. Anything it leaves elsewhere is
@@ -183,12 +198,13 @@ a run. Its contract:
   workbook copy is supporting context. Otherwise the workbook copy is
   the deliverable.
 
-`--workbook` is still the single **edit** target and the snapshot /
-rollback pivot — nothing in the `final_result/` flow mutates it.
-`<run_dir>/snapshot.xlsx` remains the rollback source on `reset`.
+`--workbooks` is the task input surface. The framework derives the first
+available `.xlsx` from that list as the primary **edit** target, while
+the full staged `workbook/` folder remains visible to the agents.
+`<run_dir>/snapshots/` remains the rollback source on `reset`.
 
 > If you want to keep the original untouched, copy it yourself before
-> invoking the runner and pass the copy as `--workbook` — the
+> invoking the runner and pass the staged copies via `--workbooks` — the
 > orchestrator will still publish its own signed copy into
 > `final_result/`.
 
@@ -253,7 +269,10 @@ from multi_agent_framework.orchestrator import Orchestrator
 
 result = Orchestrator(
     task="Add a pivot summary sheet…",
-    workbook=Path("/abs/path/to/book.xlsx"),
+    workbooks=[
+        Path("/abs/path/to/book.xlsx"),
+        Path("/abs/path/to/supporting.pdf"),
+    ],
     run_dir=Path("trace_logs/run_demo"),
     task_id="finch_0042",
 ).run()
@@ -268,8 +287,8 @@ print(result.verdict, result.iterations, result.trace_path)
 
 ## 8. Troubleshooting
 
-- **`workbook not found`** (exit code 2): the `--workbook` path is wrong or
-  relative to an unexpected cwd. Use an absolute path.
+- **`workbook not found`** (exit code 2): one of the `--workbooks` paths is
+  wrong or relative to an unexpected cwd. Use absolute paths.
 - **Codex subprocess hangs**: the framework uses `stdin=DEVNULL`, so the CLI
   never waits on a TTY. If it still hangs, the MCP server is likely
   unreachable — confirm `EXCEL_MCP_ROOT/.venv/bin/python -m excel_mcp` runs
@@ -278,5 +297,6 @@ print(result.verdict, result.iterations, result.trace_path)
   times; after that the orchestrator defaults to `redo` and logs a
   `warning` event to the trace with the tail of the final message.
 - **Looks like nothing changed after `reset`**: that's expected — the
-  workbook is restored from `snapshot.xlsx` and `impl_report.md` is deleted
-  so the next Executor doesn't read stale instructions.
+  staged `workbook/` folder is restored from `snapshots/` and
+  `impl_report.md` is deleted so the next Executor doesn't read stale
+  instructions.

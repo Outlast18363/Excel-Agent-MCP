@@ -14,6 +14,17 @@ if MCP_AVAILABLE:
     from excel_mcp import server
 
 
+def unwrap_tool_response(response: object) -> dict[str, object]:
+    """Normalize MCP wrapper return values into the shared response envelope."""
+
+    structured_content = getattr(response, "structuredContent", None)
+    if isinstance(structured_content, dict):
+        return structured_content
+    if isinstance(response, tuple) and len(response) == 2 and isinstance(response[1], dict):
+        return response[1]
+    raise AssertionError(f"Unsupported tool response type: {type(response)!r}")
+
+
 @unittest.skipUnless(MCP_AVAILABLE, "The `mcp` package is required for server wrapper tests.")
 class ServerToolTests(unittest.TestCase):
     """Verify tool wrappers return the shared envelope for all core tools."""
@@ -30,7 +41,7 @@ class ServerToolTests(unittest.TestCase):
 
         payload = {"workbook_id": "wb_001", "path": "/tmp/book.xlsx"}
         with patch.object(server.excel_service, "open_workbook", return_value=payload):
-            response = server.open_workbook("/tmp/book.xlsx")
+            response = unwrap_tool_response(server.open_workbook("/tmp/book.xlsx"))
 
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["data"], payload)
@@ -50,10 +61,41 @@ class ServerToolTests(unittest.TestCase):
             "get_sheet_state",
             side_effect=ExcelServiceError("missing sheet"),
         ):
-            response = server.get_sheet_state("wb_001", "Missing")
+            response = unwrap_tool_response(server.get_sheet_state("wb_001", "Missing"))
 
         self.assertEqual(response["status"], "error")
         self.assertEqual(response["errors"], ["missing sheet"])
+
+    def test_search_cell_success(self) -> None:
+        """Verify ``search_cell`` forwards compact match payloads unchanged."""
+
+        payload = {
+            "query": "Visible",
+            "kind": "text",
+            "scope": "workbook",
+            "limit": 10,
+            "count": 1,
+            "truncated": False,
+            "matches": ["Data!E2"],
+        }
+        with patch.object(server.excel_service, "search_cell", return_value=payload):
+            response = unwrap_tool_response(server.search_cell("wb_001", "Visible"))
+
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(response["data"]["matches"], ["Data!E2"])
+
+    def test_search_cell_error(self) -> None:
+        """Verify ``search_cell`` maps service failures into the shared envelope."""
+
+        with patch.object(
+            server.excel_service,
+            "search_cell",
+            side_effect=ExcelServiceError("`limit` must be a positive integer."),
+        ):
+            response = unwrap_tool_response(server.search_cell("wb_001", "Visible", limit=0))
+
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(response["errors"], ["`limit` must be a positive integer."])
 
     def test_get_range_success(self) -> None:
         """Verify ``get_range`` forwards range payloads through the shared envelope.
@@ -67,7 +109,7 @@ class ServerToolTests(unittest.TestCase):
 
         payload = {"sheet": "Sheet1", "range": "A1:B2", "rows": 2, "columns": 2, "values": []}
         with patch.object(server.excel_service, "get_range", return_value=payload):
-            response = server.get_range("wb_001", "Sheet1", "A1:B2")
+            response = unwrap_tool_response(server.get_range("wb_001", "Sheet1", "A1:B2"))
 
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["data"]["range"], "A1:B2")
@@ -84,7 +126,7 @@ class ServerToolTests(unittest.TestCase):
 
         payload = {"updated_values": True, "updated_formulas": False}
         with patch.object(server.excel_service, "set_range", return_value=payload):
-            response = server.set_range("wb_001", "Sheet1", "A1", values=[["x"]])
+            response = unwrap_tool_response(server.set_range("wb_001", "Sheet1", "A1", values=[["x"]]))
 
         self.assertEqual(response["status"], "success")
         self.assertTrue(response["data"]["updated_values"])
@@ -101,7 +143,7 @@ class ServerToolTests(unittest.TestCase):
 
         payload = {"recalculated": True, "total_formulas": 3, "total_errors": 0}
         with patch.object(server.excel_service, "recalculate", return_value=payload):
-            response = server.recalculate("wb_001", scope="workbook")
+            response = unwrap_tool_response(server.recalculate("wb_001", scope="workbook"))
 
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["data"]["total_formulas"], 3)
@@ -118,7 +160,7 @@ class ServerToolTests(unittest.TestCase):
 
         payload = {"image_path": "/tmp/out.png"}
         with patch.object(server.excel_service, "local_screenshot", return_value=payload):
-            response = server.local_screenshot("wb_001", "Sheet1", "A1:B2")
+            response = unwrap_tool_response(server.local_screenshot("wb_001", "Sheet1", "A1:B2"))
 
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["data"]["image_path"], "/tmp/out.png")
@@ -146,7 +188,9 @@ class ServerToolTests(unittest.TestCase):
             "edges": [{"from": "A2", "to": "B2"}],
         }
         with patch.object(server.excel_service, "trace_formula", return_value=payload):
-            response = server.trace_formula("wb_001", "TraceData", "B2", "precedents", max_depth=1)
+            response = unwrap_tool_response(
+                server.trace_formula("wb_001", "TraceData", "B2", "precedents", max_depth=1)
+            )
 
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["data"]["max_depth"], 1)

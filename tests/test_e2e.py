@@ -24,6 +24,18 @@ except ImportError:
 
 E2E_RUNTIME_AVAILABLE = XLWINGS_AVAILABLE and SERVER_IMPORTABLE
 
+
+def unwrap_tool_response(response: object) -> dict[str, object]:
+    """Normalize MCP wrapper return values into the shared response envelope."""
+
+    structured_content = getattr(response, "structuredContent", None)
+    if isinstance(structured_content, dict):
+        return structured_content
+    if isinstance(response, tuple) and len(response) == 2 and isinstance(response[1], dict):
+        return response[1]
+    raise AssertionError(f"Unsupported tool response type: {type(response)!r}")
+
+
 @unittest.skipUnless(
     E2E_RUNTIME_AVAILABLE,
     "E2E tests require xlwings and all excel_mcp runtime dependencies.",
@@ -74,8 +86,8 @@ class ExcelMcpE2ETests(unittest.TestCase):
         cls.sheet_data.range("D1").value = "Merged header"
         cls.sheet_data.range("D1:E1").merge()
         cls.sheet_data.range("E2").value = "Visible tail"
-        cls.sheet_data.range("5:5").api.Hidden = True
-        cls.sheet_data.range("C:C").api.Hidden = True
+        cls.sheet_data.range("5:5").api.EntireRow.Hidden = True
+        cls.sheet_data.range("C:C").api.EntireColumn.Hidden = True
 
         # Apply formatting to A1:B1 using xlwings high-level API instead of platform-specific underlying COM/appscript
         header_range = cls.sheet_data.range("A1:B1")
@@ -115,7 +127,7 @@ class ExcelMcpE2ETests(unittest.TestCase):
 
     def test_01_open_workbook(self) -> None:
         """Verify the server can open the workbook and extract sheet lists."""
-        response = server.open_workbook(str(self.workbook_path), visible=False)
+        response = unwrap_tool_response(server.open_workbook(str(self.workbook_path), visible=False))
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
         
         data = response["data"]
@@ -128,7 +140,7 @@ class ExcelMcpE2ETests(unittest.TestCase):
 
     def test_02_get_sheet_state(self) -> None:
         """Verify the server accurately counts sheets and formulas."""
-        response = server.get_sheet_state(self.workbook_id, "Data")
+        response = unwrap_tool_response(server.get_sheet_state(self.workbook_id, "Data"))
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
         
         data = response["data"]
@@ -144,13 +156,15 @@ class ExcelMcpE2ETests(unittest.TestCase):
 
     def test_03_get_range(self) -> None:
         """Verify the server extracts values, formulas, and formatting correctly."""
-        response = server.get_range(
-            self.workbook_id, 
-            "Data", 
-            "A1:B2",
-            include_values=True,
-            include_formulas=True,
-            include_styles=True
+        response = unwrap_tool_response(
+            server.get_range(
+                self.workbook_id,
+                "Data",
+                "A1:B2",
+                include_values=True,
+                include_formulas=True,
+                include_styles=True,
+            )
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
         
@@ -173,11 +187,13 @@ class ExcelMcpE2ETests(unittest.TestCase):
 
     def test_03b_get_range_large_payload_is_dense(self) -> None:
         """Verify large range payloads use dense arrays instead of duplicated cells."""
-        response = server.get_range(
-            self.workbook_id,
-            "Data",
-            "A1:B10",
-            include_values=True,
+        response = unwrap_tool_response(
+            server.get_range(
+                self.workbook_id,
+                "Data",
+                "A1:B10",
+                include_values=True,
+            )
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
 
@@ -191,20 +207,24 @@ class ExcelMcpE2ETests(unittest.TestCase):
 
     def test_04_set_range(self) -> None:
         """Verify the server can update values via set_range."""
-        response = server.set_range(
-            self.workbook_id,
-            "Data",
-            "D1",
-            values=[["Updated"]],
-            style={"font_bold": True},
-            save_after=True
+        response = unwrap_tool_response(
+            server.set_range(
+                self.workbook_id,
+                "Data",
+                "D1",
+                values=[["Updated"]],
+                style={"font_bold": True},
+                save_after=True,
+            )
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
         self.assertTrue(response["data"]["updated_values"])
         self.assertTrue(response["data"]["updated_style"])
         
         # Immediately verify the write worked
-        verify_resp = server.get_range(self.workbook_id, "Data", "D1", include_styles=True)
+        verify_resp = unwrap_tool_response(
+            server.get_range(self.workbook_id, "Data", "D1", include_styles=True)
+        )
         verify_data = verify_resp["data"]
         self.assertEqual(verify_data["values"][0][0], "Updated")
         cell_style = verify_data["style_table"][verify_data["style_ids"][0][0]]
@@ -216,7 +236,9 @@ class ExcelMcpE2ETests(unittest.TestCase):
         cell_c1_val = server.excel_service._get_range(workbook_id=self.workbook_id, sheet_name="Data", range_address="C1").value
         # print("C1 VAL IS:", repr(cell_c1_val))
         
-        response = server.recalculate(self.workbook_id, scope="sheet", sheet="Data")
+        response = unwrap_tool_response(
+            server.recalculate(self.workbook_id, scope="sheet", sheet="Data")
+        )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
         
         data = response["data"]
@@ -239,21 +261,25 @@ class ExcelMcpE2ETests(unittest.TestCase):
     def test_06_local_screenshot(self) -> None:
         """Verify screenshots capture cell fill colors and have an opaque background."""
         # Apply green fill to column A so the screenshot visibly captures color
-        color_resp = server.set_range(
-            self.workbook_id,
-            "Data",
-            "A1:A10",
-            style={"fill_color": "#00B050"},
-            save_after=True,
+        color_resp = unwrap_tool_response(
+            server.set_range(
+                self.workbook_id,
+                "Data",
+                "A1:A10",
+                style={"fill_color": "#00B050"},
+                save_after=True,
+            )
         )
         self.assertEqual(color_resp["status"], "success", f"Error: {color_resp.get('errors')}")
         self.assertTrue(color_resp["data"]["updated_style"])
 
-        response = server.local_screenshot(
-            self.workbook_id,
-            "Data",
-            "A1:D10",
-            output_path=str(self.screenshot_path)
+        response = unwrap_tool_response(
+            server.local_screenshot(
+                self.workbook_id,
+                "Data",
+                "A1:D10",
+                output_path=str(self.screenshot_path),
+            )
         )
         
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
@@ -270,6 +296,59 @@ class ExcelMcpE2ETests(unittest.TestCase):
             alpha_min = img.getchannel("A").getextrema()[0]
             self.assertEqual(alpha_min, 255, "Screenshot still contains transparent pixels")
 
+    def test_06a_search_cell_numeric_value(self) -> None:
+        """Verify numeric queries match computed cell values."""
+
+        response = unwrap_tool_response(server.search_cell(self.workbook_id, 20, sheet="Data"))
+        self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
+
+        data = response["data"]
+        self.assertEqual(data["kind"], "number")
+        self.assertEqual(data["scope"], "sheet")
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["matches"], ["B10"])
+
+    def test_06b_search_cell_formula(self) -> None:
+        """Verify formula queries match normalized formula text."""
+
+        response = unwrap_tool_response(server.search_cell(self.workbook_id, "=A2 * 2", sheet="Data"))
+        self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
+
+        data = response["data"]
+        self.assertEqual(data["kind"], "formula")
+        self.assertIn("B2", data["matches"])
+
+    def test_06c_search_cell_text_substring(self) -> None:
+        """Verify text queries match string cell values within a sheet."""
+
+        response = unwrap_tool_response(server.search_cell(self.workbook_id, "Visible", sheet="Data"))
+        self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
+
+        data = response["data"]
+        self.assertEqual(data["kind"], "text")
+        self.assertEqual(data["matches"], ["E2"])
+
+    def test_06d_search_cell_workbook_scope(self) -> None:
+        """Verify workbook-scope searches prefix matches with the sheet name."""
+
+        response = unwrap_tool_response(server.search_cell(self.workbook_id, "Visible"))
+        self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
+
+        data = response["data"]
+        self.assertEqual(data["scope"], "workbook")
+        self.assertEqual(data["matches"], ["Data!E2"])
+
+    def test_06e_search_cell_limit_truncates(self) -> None:
+        """Verify search results respect ``limit`` and report truncation."""
+
+        response = unwrap_tool_response(server.search_cell(self.workbook_id, "2", sheet="Data", limit=2))
+        self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
+
+        data = response["data"]
+        self.assertEqual(data["kind"], "text")
+        self.assertEqual(len(data["matches"]), 2)
+        self.assertTrue(data["truncated"])
+
     def test_07_close_workbook(self) -> None:
         """Verify the server can close a workbook and release its cached session.
 
@@ -283,12 +362,12 @@ class ExcelMcpE2ETests(unittest.TestCase):
 
         workbook_id = getattr(self.__class__, "workbook_id", "")
         if not workbook_id:
-            open_response = server.open_workbook(str(self.workbook_path), visible=False)
+            open_response = unwrap_tool_response(server.open_workbook(str(self.workbook_path), visible=False))
             self.assertEqual(open_response["status"], "success", f"Error: {open_response.get('errors')}")
             workbook_id = open_response["data"]["workbook_id"]
             self.__class__.workbook_id = workbook_id
 
-        response = server.close_workbook(workbook_id, save=False)
+        response = unwrap_tool_response(server.close_workbook(workbook_id, save=False))
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
 
         data = response["data"]
@@ -403,7 +482,7 @@ class TraceFormulaE2ETests(unittest.TestCase):
             ``None``. Assertions validate workbook setup.
         """
 
-        response = server.open_workbook(str(self.workbook_path), visible=False)
+        response = unwrap_tool_response(server.open_workbook(str(self.workbook_path), visible=False))
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
 
         data = response["data"]
@@ -420,12 +499,14 @@ class TraceFormulaE2ETests(unittest.TestCase):
             ``None``. Assertions validate direct precedent tracing.
         """
 
-        response = server.trace_formula(
-            self.workbook_id,
-            "Calc",
-            "B2",
-            "precedents",
-            max_depth=1,
+        response = unwrap_tool_response(
+            server.trace_formula(
+                self.workbook_id,
+                "Calc",
+                "B2",
+                "precedents",
+                max_depth=1,
+            )
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
         self.assertTrue(response["data"]["complete"])
@@ -443,12 +524,14 @@ class TraceFormulaE2ETests(unittest.TestCase):
             ``None``. Assertions validate direct dependent tracing.
         """
 
-        response = server.trace_formula(
-            self.workbook_id,
-            "Inputs",
-            "A1",
-            "dependents",
-            max_depth=1,
+        response = unwrap_tool_response(
+            server.trace_formula(
+                self.workbook_id,
+                "Inputs",
+                "A1",
+                "dependents",
+                max_depth=1,
+            )
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
         edge_pairs = self._collect_edge_pairs(response)
@@ -465,12 +548,14 @@ class TraceFormulaE2ETests(unittest.TestCase):
             ``None``. Assertions validate range precedent tracing.
         """
 
-        response = server.trace_formula(
-            self.workbook_id,
-            "Inputs",
-            "A1",
-            "dependents",
-            max_depth=None,
+        response = unwrap_tool_response(
+            server.trace_formula(
+                self.workbook_id,
+                "Inputs",
+                "A1",
+                "dependents",
+                max_depth=None,
+            )
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
         node_ids = self._collect_node_ids(response)
@@ -488,12 +573,14 @@ class TraceFormulaE2ETests(unittest.TestCase):
             ``None``. Assertions validate transitive dependent tracing.
         """
 
-        response = server.trace_formula(
-            self.workbook_id,
-            "Inputs",
-            "A1",
-            "dependents",
-            max_depth=2,
+        response = unwrap_tool_response(
+            server.trace_formula(
+                self.workbook_id,
+                "Inputs",
+                "A1",
+                "dependents",
+                max_depth=2,
+            )
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
         node_ids = self._collect_node_ids(response)
@@ -512,13 +599,15 @@ class TraceFormulaE2ETests(unittest.TestCase):
             ``None``. Assertions validate graph scope and address stability.
         """
 
-        response = server.trace_formula(
-            self.workbook_id,
-            "Calc",
-            "C1:C2",
-            "precedents",
-            max_depth=1,
-            include_addresses=False,
+        response = unwrap_tool_response(
+            server.trace_formula(
+                self.workbook_id,
+                "Calc",
+                "C1:C2",
+                "precedents",
+                max_depth=1,
+                include_addresses=False,
+            )
         )
         self.assertEqual(response["status"], "success", f"Error: {response.get('errors')}")
         edge_pairs = self._collect_edge_pairs(response)

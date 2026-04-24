@@ -193,6 +193,40 @@ def get_sheet_state(
 
 
 @mcp_server.tool()
+def search_cell(
+    workbook_id: str,
+    query: str | int | float,
+    sheet: str | None = None,
+    limit: int = 10,
+    match_formulas: bool = True,
+) -> McpToolResult:
+    """Find up to ``limit`` matching cells in one sheet or the whole workbook.
+
+    ``query`` types:
+      - number: exact match against computed cell values.
+      - string starting with ``=``: case- and whitespace-insensitive substring
+        match against formula text.
+      - plain string: case-insensitive substring match against stringified cell
+        values and, when ``match_formulas=True``, formula text.
+
+    Returns:
+        Compact payload with ``query``, ``kind``, ``scope``, ``limit``,
+        ``count``, ``truncated``, and flat ``matches`` list. Single-sheet scope
+        returns bare ``A1`` addresses; workbook scope returns ``Sheet!A1``.
+    """
+
+    return _execute_tool(
+        lambda: excel_service.search_cell(
+            workbook_id=workbook_id,
+            query=query,
+            sheet=sheet,
+            limit=limit,
+            match_formulas=match_formulas,
+        )
+    )
+
+
+@mcp_server.tool()
 def get_range(
     workbook_id: str,
     sheet: str,

@@ -3,7 +3,7 @@
 Example:
     python -m multi_agent_framework.runner \\
         --task "Add a pivot summary sheet..." \\
-        --workbook /path/to/book.xlsx \\
+        --workbooks /path/to/book.xlsx /path/to/supporting.pdf \\
         --run-dir trace_logs/run_20260419
 """
 
@@ -19,12 +19,19 @@ from .orchestrator import MAX_REDO, MAX_RESET, Orchestrator
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="multi_agent_framework.runner")
     p.add_argument("--task", required=True, help="natural-language task for the agent team")
-    p.add_argument("--workbook", required=True, type=Path, help="path to the .xlsx to operate on")
+    p.add_argument(
+        "--workbooks",
+        required=True,
+        nargs="+",
+        type=Path,
+        help="Task workbook/source file paths staged inside the run workbook directory. "
+             "The framework snapshots this full set and restores the folder from it on reset.",
+    )
     p.add_argument(
         "--run-dir",
         type=Path,
         default=None,
-        help="directory for handover/, snapshot.xlsx, trace.jsonl (default: trace_logs/run_<ts>)",
+        help="directory for handover/, snapshots/, trace.jsonl (default: trace_logs/run_<ts>)",
     )
     p.add_argument(
         "--task-id",
@@ -32,6 +39,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Identifier used to sign the orchestrator's workbook copy "
              "inside final_result/ (e.g. Finch dataset id). "
              "Defaults to run_dir basename.",
+    )
+    p.add_argument(
+        "--empty-workbook-created",
+        action="store_true",
+        help="Indicates the wrapper synthesized a blank .xlsx because the task had no source workbook.",
     )
     return p.parse_args(argv)
 
@@ -50,17 +62,19 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "trace.jsonl").unlink(missing_ok=True)
     (run_dir / "wrapper_summary.json").unlink(missing_ok=True)
 
-    if not args.workbook.exists():
-        print(f"workbook not found: {args.workbook}", file=sys.stderr)
+    missing = [path for path in args.workbooks if not path.exists()]
+    if missing:
+        print(f"workbook not found: {missing[0]}", file=sys.stderr)
         return 2
 
-    # When --task-id is omitted, fall back to the run_dir basename so the
-    # signature naming (`{task_id}_final_result.xlsx`) still resolves.
+    # When --task-id is omitted, fall back to the run_dir basename so the run
+    # still has a stable identifier in logs and summaries.
     task_id = args.task_id or run_dir.name
 
     result = Orchestrator(
         task=args.task,
-        workbook=args.workbook,
+        workbooks=args.workbooks,
+        empty_workbook_created=args.empty_workbook_created,
         run_dir=run_dir,
         task_id=task_id,
     ).run()

@@ -14,8 +14,11 @@ CODEX_CLI = (
 )
 EXCEL_MCP_ROOT = Path(os.environ.get("EXCEL_MCP_ROOT") or Path(__file__).resolve().parents[1])
 MODEL = "gpt-5.4"
-REASONING_EFFORT = "low"
+REASONING_EFFORT = "high"
+SERVICE_TIER = "fast"
+FAST_MODE = True
 APPROVAL_POLICY = "never"
+# Fast tier is CLI-accepted here, but Codex docs say it only takes effect for ChatGPT-authenticated sessions, not API-key logins.
 # On Windows, codex's `workspace-write` sandbox has been observed to cause native
 # sandbox access failures (documented in raw_api_baseline/README.md). Match the
 # raw_api_baseline default there: `danger-full-access` paired with the
@@ -25,10 +28,10 @@ SANDBOX_MODE = "danger-full-access" if os.name == "nt" else "workspace-write"
 
 # Per-role excel-mcp tool allowlists. Planner only inspects; Executor mutates;
 # Evaluator inspects and can trace formulas to verify the Executor's work.
-_PLANNER_TOOLS = ["open_workbook", "get_sheet_state", "local_screenshot", "get_range", "close_workbook"]
+_PLANNER_TOOLS = ["open_workbook", "get_sheet_state", "local_screenshot", "get_range", "close_workbook", "search_cell"]
 ROLE_TOOLS: dict[str, list[str]] = {
     "Planner": _PLANNER_TOOLS,
-    "Executor": _PLANNER_TOOLS + ["web_search", "xlwing_skills"],
+    "Executor": _PLANNER_TOOLS + ["web_search"],
     "Evaluator": _PLANNER_TOOLS + ["trace_formula"],
     # Distiller is pure text-to-text (eval report -> execution hint); no MCP
     # tools needed. Empty allowlist disables every excel-mcp tool for its subprocess.
@@ -80,6 +83,8 @@ def build_codex_cmd(role: str, workspace: Path) -> list[str]:
         *_excel_mcp_overrides(role),
         # Bare (not double-quoted) enum identifiers; matches raw_api_baseline.
         "-c", f"model_reasoning_effort={REASONING_EFFORT}",
+        "-c", f'service_tier="{SERVICE_TIER}"',
+        "-c", f"features.fast_mode={str(FAST_MODE).lower()}",
         "-c", f"approval_policy={APPROVAL_POLICY}",
     ]
     if SANDBOX_MODE == "danger-full-access":

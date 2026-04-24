@@ -79,35 +79,63 @@ class BaseAgent:
 class PlannerAgent(BaseAgent):
     ROLE = "Planner"
 
-    def build_prompt(self, task: str, workbook: Path, plan_path: Path) -> str:
+    def build_prompt(
+        self,
+        task: str,
+        workbook: Path,
+        workbook_dir: Path,
+        workbook_note: str,
+        plan_path: Path,
+        run_dir: Path,
+    ) -> str:
         return f"""\
-You are the PLANNER. You do not modify the workbook. Use only inspection tools
-(open_workbook, get_sheet_state, local_screenshot, get_range, close_workbook)
-to understand the current state, then produce concise, structured plan another
-agent can execute.
+You are the PLANNER. You do not modify the workbook. Use only inspection tools to produce a curated list of potential items that may be relavent to the task. You should include a concise list of excel item names, and indicate if they are columns, rows, or other, which appropreate address indication (e.g. A1, A:A, A1:A10, etc.) to address the item. You may also include workbook insights or key obersvations that are GROUNDED to the workbook and are related to the task. If the task contains non xlsx source files, you may use suitable libraries to inspect them and include a breif description of important file structure and content and you may pass the report to the executor. No need to read the excel file if its the orchetrator generated empty workbook. Important: you may write to the plan file incrementally as you read through the workbook. You don't need to write the whole plan in one go.
 
+## Behavoir Requirements:
+1. You may try to use local_screenshot tool to get a visual of the workbook, and use it to help you quickly understand the workbook structure and the header information.
+
+2. Estimate get_range tool's return size before using it.
+
+3. You may use the get_range tool to inspect the item you are interested in, but you may ONLY use get_range for ranges with (<200 cells). It is STRONGLY recommended to ASK A SUBAGENT to use get_range and return to you the things want to know if the range is more than 100 cells.
+
+4. Your plan should be concise, structured, and information dense.
+
+5. When using the local_screenshot tool, always store the screenshots in the screenshots folder within the run dir: {run_dir}/screenshots/.
+
+6. ALWAYS close the workbook when you are done with it.
+
+7. You should conclude your plan when you feel like what you have written is enough to guide the executor to solve the task, DON'T overflow your plan file withn surplus information.
+
+8. Instead of frequently using get_range, try use local_Screenshot tool to grasp the important labels and use search_cell tool to find the locations of the labels.
+
+## Important Information:
 Task: {task}
 
-Workbook (read-only for you): {workbook}
+Primary workbook (read-only for you): {workbook}
+Workbook folder (contains all task files): {workbook_dir}
+{workbook_note}
 
 Write your final plan as Markdown to: {plan_path}
-The plan must list concrete steps, target cells/ranges, formulas, and any
-verification checkpoints. Here is an example:
 
-**Task:** Fill out the Net Income column in the 'Income Statement' sheet. **Insight:** Net Income requires 'Sales Revenue' and 'Cost of Goods Sold' (COGS). 'Sales Revenue' must first be derived by backing out the 'Sales Tax' (located in the 'Cost' sheet) from the 'Sales Account' column.
-
-**Execution Plan:**
-
-1. Calculate the 'Sales Revenue' column using the formula: `Sales Account / (1 + Sales Tax)`. Ensure the reference to the Sales Tax cell is absolute.
-2. Calculate the 'Net Income' column using the formula: `Sales Revenue - COGS`.
-
-**Verifiable Expectations (For Evaluator):**
-- **Check 1 (Absolute Referencing):** Sample 2-3 random cells in the newly calculated 'Sales Revenue' column. Verify that the formula uses an absolute reference for the Sales Tax cell (e.g., `Cost!$B$2`) so it does not shift across rows.
-- **Check 2 (Row Alignment):** Sample 2-3 random cells in the 'Net Income' column (e.g., A45, A112). Verify the formula accurately references the 'Sales Revenue' and 'COGS' cells strictly without row dislocation (such as the 3rd sales revenue is added to the 4th COGS value)
 """
 
-    def run(self, task: str, workbook: Path, plan_path: Path) -> str:
-        return self._stream(self.build_prompt(task=task, workbook=workbook, plan_path=plan_path))
+    def run(
+        self,
+        task: str,
+        workbook: Path,
+        workbook_dir: Path,
+        workbook_note: str,
+        plan_path: Path,
+        run_dir: Path,
+    ) -> str:
+        return self._stream(self.build_prompt(
+            task=task,
+            workbook=workbook,
+            workbook_dir=workbook_dir,
+            workbook_note=workbook_note,
+            plan_path=plan_path,
+            run_dir=run_dir,
+        ))
 
 
 class ExecutorAgent(BaseAgent):
@@ -118,32 +146,57 @@ class ExecutorAgent(BaseAgent):
         task: str,
         plan_path: Path,
         workbook: Path,
+        workbook_dir: Path,
+        workbook_note: str,
         final_dir: Path,
         impl_path: Path,
         impl_path_or_none: Path | None,
         eval_path_or_none: Path | None,
         hint_path_or_none: Path | None,
+        run_dir: Path,
     ) -> str:
         return f"""\
-You are the EXECUTOR. You implement the plan by modifying the workbook using
-xlwing (and Excel mcp inspection tools as needed). If a prior evaluation report is
-provided, treat its findings as authoritative and fix them.
+You are the EXECUTOR. You are provided a excel related task, you are also provided a 'plan file' which contains the potentially task relavent column or row labels and key observations. Based on the task description and the plan file, you may first come up with potential formulas or relationships to use to solve the task, using the variables and locations given in the plan file (you can trust the label and location information in plan file to avoid excessive workbook inspection). If you think the formula you want to use contains variables that are not given in the plan file, you may use the search tools in the MCP server to find information you need. After you have a good idea of the procedures you may take to solve the task, write your implementation plan to {impl_path}. You may implement the task by modifying the workbook using xlwings (and Excel mcp inspection tools as needed). If a prior evaluation report is provided, treat its findings as authoritative and fix them. 
 
+Important: your checklist items should be specific actionable steps with reference to relavent items in the excel workbook (such as Update downstream cash-flow add-back at xxx so it references the populated amortization rows.) instead of vague general instructions like "Update the cash-flow add-back".
+
+## Behavoir Requirements:
+1. Do not copy or export the workbook into {final_dir} — the system copies it for you. However, if the task requires a non-Excel deliverable (like .txt / .md / .pdf / .docx / .csv), write it directly into {final_dir}.
+
+2. You may quickly verify the location of the items in the plan file by using the search_cell tool in the MCP server.
+
+3. You can include todo checklist in your implementation report to help you keep track of the tasks you need to complete and frequently check in with the plan to ensure alignment.
+
+4. After you have implemented the task, you may append a breif report of what you have implemented by starting a new section called "Implementation Report", in your earlier report at {impl_path}.
+
+5. If your task is about graph construction, always use local_screenshot tool to verify that your graph formation is correct and complies with the task requirments.
+
+6. Estimate get_range tool's return size before using it.
+
+7. You may use the get_range tool to inspect the item you are interested in, but you may ONLY use get_range for ranges with (<200 cells). It is STRONGLY recommended to ASK A SUBAGENT to use get_range and return to you the things want to know if the range is more than 100 cells.
+
+8. Usually you don't need to inspect large ranges because of plan file's suggestions, but if you were to inspect large ranges, you may use the local_screenshot tool instead.
+
+9. When using the local_screenshot tool, always store the screenshots in the screenshots folder within the run dir: {run_dir}/screenshots/.
+
+10. Use xlwings to make edits or plot graphs. You may search for xlwings documentation and examples online to help you (Like: https://docs.xlwings.org/en/latest/syntax_overview.html).
+
+11.BEFORE any standalone xlwings/openpyxl edit, CLOSE the MCP workbook session; do the edit with exclusive access, save and close Excel, then reopen the workbook in MCP before further inspection or screenshots.
+
+12. ALWAYS close the workbook when you are done with it.
+
+13. Make sure to CHECK OFF the item in your checklist by adding a "[CHECKED]" after you finished corresponding item.
+
+## Important Information:
 Task: {task}
 Plan file: {plan_path}
 Prior implementation report (may be None): {impl_path_or_none}
 Prior evaluation report (may be None): {eval_path_or_none}
 Prior error hint (may be None): {hint_path_or_none}
 Workbook to modify: {workbook}
-
+Workbook folder (contains all task files): {workbook_dir}
+{workbook_note}
 Final deliverable folder: {final_dir}
-
-Do not copy or export the workbook into {final_dir} — the system
-copies it for you. If the task requires a non-Excel deliverable (e.g.
-.txt / .md / .pdf / .docx / .csv), write it directly into {final_dir}.
-
-Write a concise and structured implementation report (what you changed, where, and why) to:
-{impl_path}
 """
 
     def run(
@@ -151,11 +204,14 @@ Write a concise and structured implementation report (what you changed, where, a
         task: str,
         plan_path: Path,
         workbook: Path,
+        workbook_dir: Path,
+        workbook_note: str,
         final_dir: Path,
         impl_path: Path,
         impl_path_or_none: Path | None,
         eval_path_or_none: Path | None,
         hint_path_or_none: Path | None,
+        run_dir: Path,
     ) -> str:
         # The distilled hint replaces the full eval report on reset; exposing both
         # would re-leak the stale cell-level findings the Distiller exists to strip.
@@ -169,11 +225,14 @@ Write a concise and structured implementation report (what you changed, where, a
             task=task,
             plan_path=plan_path,
             workbook=workbook,
+            workbook_dir=workbook_dir,
+            workbook_note=workbook_note,
             final_dir=final_dir,
             impl_path=impl_path,
             impl_path_or_none=impl_path_or_none,
             eval_path_or_none=eval_path_or_none,
             hint_path_or_none=hint_path_or_none,
+            run_dir=run_dir,
         ))
 
 
@@ -190,38 +249,52 @@ class EvaluatorAgent(BaseAgent):
         plan_path: Path,
         impl_path: Path,
         workbook: Path,
+        workbook_dir: Path,
+        workbook_note: str,
         final_dir: Path,
         eval_path: Path,
         task: Path,
+        run_dir: Path,
     ) -> str:
         return f"""\
-You are the EVALUATOR. You verify the Executor's work against the plan using mcp
-inspection tools and trace_formula. You do not modify the workbook.
 
-Task: {task}
-Plan file: {plan_path}
-Implementation report: {impl_path}
+## Role Description:        
+You are the EVALUATOR. You verify the Executor Agent's work through its final deliverable {final_dir} and the implementation report {impl_path} based on the task description {task}. The Plan file {plan_path} contains locations of potentially relavent item locations to guide your lookup, if your check inovles them. Workbook copy (published by orchestrator, inside {final_dir}): {workbook}. Original task workbook folder: {workbook_dir}
+{workbook_note}
 
-Final deliverable folder: {final_dir}
-Workbook copy (published by orchestrator, inside {final_dir}): {workbook}
+You need to read through the provided files first and come up with a checklist of checks to verify whether the executor correctly fulfilled the task to write to your evaluation report at {eval_path}. Then, you may check against the checklist one by one (mark the checklist items in the report as PASSED or FAILED with concise yet informative explainations as you go through the checklist items). Finally, provide a one word final verdict in a "Verdict" sectionat the end of your evaluation report to indicate whether the executor successfully fulfilled the task. The verdict should be one of the following: "Success", "Redo", or "Reset". Here is the standard for each verdict:
 
-Inspect the workbook copy against the Planner's expectation checks; if
-{final_dir} also contains a non-xlsx file, inspect that deliverable too
-and treat it as the primary answer (workbook is supporting context).
+Success: task is fully satisfied, no further work.
+Redo: defects in implementation that the Executor can fix in place in the current workbook file.
+Reset: Executor maded multiple interdependent mistakes, safer to roll back to the original workbook file and start over.
 
-Write a Markdown evaluation report (findings, pass/fail per plan step, your verdict in one word: redo, reset, or success) to: {eval_path}
+## Behavoir Requirements:
 
-Evaluation report example:
+1. Estimate get_range tool's return size before using it.
+
+2. You may use the get_range tool to inspect the item you are interested in, but you may ONLY use get_range for ranges with (<200 cells). It is STRONGLY recommended to ASK A SUBAGENT to use get_range and return to you the things want to know if the range is more than 100 cells.
+
+3. Usually you don't need to inspect large ranges because of plan file's suggestions, but if you were to inspect large ranges, you may use the local_screenshot tool instead.
+
+4. If there are non xlsx files in the final deliverable folder {final_dir}, inspect that deliverable and treat it as the answer from the executor (workbook is supporting context).
+
+5. When using the local_screenshot tool, always store the screenshots in the screenshots folder within the run dir: {run_dir}/screenshots/.
+
+6. You may quickly verify the location of the items in the implementation and plan file by using the search_cell tool in the MCP server.
+
+7. ALWAYS close the workbook when you are done with it.
+
+## Evaluation report example:
 ---
 **EVALUATION SUMMARY:**
 [1-2 sentences summarizing the overall execution state and the primary reason for failure, if applicable.]
 
 **EXPECTATION CHECKS:**
 * **Check 1: [Name of Check from Planner] - [PASS / FAIL]**
-    * *Sampled Cells:* [e.g., Cost!B45, Cost!B112]
-    * *Observation:* [e.g., Formula accurately uses absolute reference `$B$2`. / Formula failed to use absolute reference; row shifted to `B46`.]
+    * *Cells involved:*
+    * *Observation:* 
 * **Check 2: [Name of Check from Planner] - [PASS / FAIL]**
-    * *Sampled Cells:* [e.g., A45, A112]
+    * *Cells involved:*
     * *Observation:* [e.g., Formula correctly subtracts COGS from Sales Revenue. / Row dislocation detected: A45 references Sales Revenue from row 44.]
 
 **ADDITIONAL ERRORS FOUND:**
@@ -235,10 +308,10 @@ Evaluation report example:
 ---
 
 Then, in your FINAL assistant message (not in the report file), end with
-exactly one verdict tag on its own:
-  <verdict>success</verdict>  — plan fully satisfied, no further work
-  <verdict>redo</verdict>     — defects the Executor can fix in place
-  <verdict>reset</verdict>    — Executor maded multiple interdependent mistakes, safer to roll back to the original file and start over
+exactly one verdict tag on its own (same as the verdict in your evaluation report):
+  <verdict>success</verdict>
+  <verdict>redo</verdict> 
+  <verdict>reset</verdict>
 """
 
     def run(
@@ -246,17 +319,23 @@ exactly one verdict tag on its own:
         plan_path: Path,
         impl_path: Path,
         workbook: Path,
+        workbook_dir: Path,
+        workbook_note: str,
         final_dir: Path,
         eval_path: Path,
         task: Path,
+        run_dir: Path,
     ) -> tuple[str, str]:
         prompt = self.build_prompt(
             plan_path=plan_path,
             impl_path=impl_path,
             workbook=workbook,
+            workbook_dir=workbook_dir,
+            workbook_note=workbook_note,
             final_dir=final_dir,
             eval_path=eval_path,
-            task=task
+            task=task,
+            run_dir=run_dir,
         )
         final_msg = ""
         for attempt in range(self.MAX_VERDICT_RETRY + 1):

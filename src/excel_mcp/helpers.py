@@ -89,6 +89,12 @@ def row_column_to_a1_address(row_number: int, column_number: int) -> str:
     return f"{column_number_to_name(column_number)}{row_number}"
 
 
+def normalize_formula_query(text: str) -> str:
+    """Normalize formula text for case- and whitespace-insensitive matching."""
+
+    return re.sub(r"\s+", "", text).lower()
+
+
 def zero_based_bounds_to_a1_range(
     first_row_index: int,
     first_column_index: int,
