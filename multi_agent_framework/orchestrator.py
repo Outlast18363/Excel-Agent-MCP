@@ -35,23 +35,34 @@ class Orchestrator:
     def __init__(
         self,
         task: str,
-        workbooks: list[Path],
+        workbooks: list[Path] | None = None,
+        *,
+        workbook_dir: Path | None = None,
         empty_workbook_created: bool,
         run_dir: Path,
         task_id: str,
     ):
         self.task = task
-        self.workbooks = [Path(path).resolve() for path in workbooks]
-        if not self.workbooks:
-            raise ValueError("workbooks must contain at least one staged task file.")
-        self.workbook = next(
-            (path for path in self.workbooks if path.suffix.lower() == ".xlsx"),
-            None,
-        )
-        if self.workbook is None:
-            raise ValueError("workbooks must include at least one .xlsx file.")
-        self.workbook_dir = self.workbook.parent
-        self.workbook_note = self._build_workbook_note(empty_workbook_created)
+
+        if workbook_dir is not None:
+            self.workbook_dir = Path(workbook_dir).resolve()
+            if not self.workbook_dir.is_dir():
+                raise ValueError("workbook_dir must exist and be a directory.")
+            self.workbooks = self._scan_workbook_dir(self.workbook_dir)
+            if not self.workbooks:
+                raise ValueError("workbook_dir must contain at least one staged task file.")
+        else:
+            resolved_workbooks = [Path(path).resolve() for path in workbooks or []]
+            if not resolved_workbooks:
+                raise ValueError("workbooks must contain at least one staged task file.")
+            parents = {path.parent for path in resolved_workbooks}
+            if len(parents) != 1:
+                raise ValueError("workbooks must all live in the same staged workbook directory.")
+            self.workbooks = resolved_workbooks
+            self.workbook_dir = resolved_workbooks[0].parent
+
+        self.xlsx_files = [path for path in self.workbooks if path.suffix.lower() == ".xlsx"]
+        self.staging_note = self._build_staging_note(self.workbooks, empty_workbook_created)
         self.run_dir = Path(run_dir).resolve()
         self.task_id = task_id
 
@@ -65,13 +76,12 @@ class Orchestrator:
 
         self.snapshot_dir = self.run_dir / "snapshots"
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
-        self.snapshot_path = self.snapshot_dir / self.workbook.name
         self.trace_path = self.run_dir / "trace.jsonl"
 
         # final_result/ is the orchestrator-owned deliverable surface.
         self.final_dir = self.run_dir / "final_result"
         self.final_dir.mkdir(parents=True, exist_ok=True)
-        self.final_workbook = self.final_dir / self.workbook.name
+        self.final_workbook_dir = self.final_dir
 
         # If this run_dir has been used before, wipe the prior run's artifacts so
         # the new run starts from a clean slate. Must run AFTER the mkdir calls
@@ -79,14 +89,29 @@ class Orchestrator:
         self._clear_prior_run()
 
     @staticmethod
-    def _build_workbook_note(empty_workbook_created: bool) -> str:
-        """Describe whether the primary workbook came from the task or was synthesized."""
+    def _scan_workbook_dir(workbook_dir: Path) -> list[Path]:
+        return sorted(
+            [path.resolve() for path in workbook_dir.iterdir() if path.is_file() or path.is_symlink()],
+            key=lambda path: path.name.lower(),
+        )
+
+    @staticmethod
+    def _build_staging_note(workbooks: list[Path], empty_workbook_created: bool) -> str:
+        """Describe the staged task files without requiring a primary workbook."""
         if empty_workbook_created:
             return (
                 "Workbook note: the primary .xlsx was created by the orchestrator as a blank "
                 "workbook because the task did not provide one."
             )
-        return "Workbook note: the primary .xlsx came from the staged task files."
+        suffixes = sorted({path.suffix.lower() or "(no extension)" for path in workbooks})
+        if not suffixes:
+            return "Staging note: the workbook folder contains the staged task files."
+        return f"Staging note: staged task files include {', '.join(suffixes)}."
+
+    @staticmethod
+    def _build_workbook_note(empty_workbook_created: bool) -> str:
+        """Backward-compatible alias for older prompt-context tests."""
+        return Orchestrator._build_staging_note([], empty_workbook_created)
 
     def _clear_prior_run(self) -> None:
         """Wipe artifacts from a prior orchestrator run in this run_dir, if any.
@@ -195,7 +220,7 @@ class Orchestrator:
                 snapshot_files.append(str(snapshot_path))
             bus.emit("ORCHESTRATOR", {
                 "type": "snapshot",
-                "path": str(self.snapshot_path),
+                "path": str(self.snapshot_dir),
                 "paths": snapshot_files,
                 "workbooks": [str(p) for p in self.workbooks],
             })
@@ -203,9 +228,8 @@ class Orchestrator:
             bus.transition(None, "Planner", 0, "start")
             planner.run(
                 task=self.task,
-                workbook=self.workbook,
                 workbook_dir=self.workbook_dir,
-                workbook_note=self.workbook_note,
+                staging_note=self.staging_note,
                 plan_path=self.plan_path,
                 run_dir=self.run_dir,
             )
@@ -236,9 +260,8 @@ class Orchestrator:
                 executor.run(
                     task=self.task,
                     plan_path=self.plan_path,
-                    workbook=self.workbook,
                     workbook_dir=self.workbook_dir,
-                    workbook_note=self.workbook_note,
+                    staging_note=self.staging_note,
                     final_dir=self.final_dir,
                     impl_path=self.impl_path,
                     impl_path_or_none=self.impl_path if has_prior_impl else None,
@@ -263,9 +286,8 @@ class Orchestrator:
                 _, verdict = evaluator.run(
                     plan_path=self.plan_path,
                     impl_path=self.impl_path,
-                    workbook=self.final_workbook,
                     workbook_dir=self.workbook_dir,
-                    workbook_note=self.workbook_note,
+                    staging_note=self.staging_note,
                     final_dir=self.final_dir,
                     eval_path=self.eval_path,
                     task=self.task,

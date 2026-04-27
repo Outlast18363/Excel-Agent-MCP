@@ -62,6 +62,12 @@ class BaseAgent:
                 # non-JSON chatter (e.g. stderr merged in) — record verbatim and skip
                 self.bus.emit(self.ROLE, {"type": "raw", "line": line})
                 continue
+            if not isinstance(event, dict):
+                # Some child commands print JSON payloads like arrays. Those are
+                # valid JSON, but they are not Codex event objects and should be
+                # preserved as raw output instead of crashing EventBus.emit().
+                self.bus.emit(self.ROLE, {"type": "raw", "line": line})
+                continue
             self.bus.emit(self.ROLE, event)
             # Track the most recent completed agent_message; whatever the agent
             # said last is what callers care about (verdict tag, handover note, …).
@@ -82,9 +88,8 @@ class PlannerAgent(BaseAgent):
     def build_prompt(
         self,
         task: str,
-        workbook: Path,
         workbook_dir: Path,
-        workbook_note: str,
+        staging_note: str,
         plan_path: Path,
         run_dir: Path,
     ) -> str:
@@ -111,9 +116,8 @@ You are the PLANNER. You do not modify the workbook. Use only inspection tools t
 ## Important Information:
 Task: {task}
 
-Primary workbook (read-only for you): {workbook}
-Workbook folder (contains all task files): {workbook_dir}
-{workbook_note}
+Workbook folder (contains all task files, read-only for you): {workbook_dir}
+{staging_note}
 
 Write your final plan as Markdown to: {plan_path}
 
@@ -122,17 +126,15 @@ Write your final plan as Markdown to: {plan_path}
     def run(
         self,
         task: str,
-        workbook: Path,
         workbook_dir: Path,
-        workbook_note: str,
+        staging_note: str,
         plan_path: Path,
         run_dir: Path,
     ) -> str:
         return self._stream(self.build_prompt(
             task=task,
-            workbook=workbook,
             workbook_dir=workbook_dir,
-            workbook_note=workbook_note,
+            staging_note=staging_note,
             plan_path=plan_path,
             run_dir=run_dir,
         ))
@@ -145,9 +147,8 @@ class ExecutorAgent(BaseAgent):
         self,
         task: str,
         plan_path: Path,
-        workbook: Path,
         workbook_dir: Path,
-        workbook_note: str,
+        staging_note: str,
         final_dir: Path,
         impl_path: Path,
         impl_path_or_none: Path | None,
@@ -156,7 +157,7 @@ class ExecutorAgent(BaseAgent):
         run_dir: Path,
     ) -> str:
         return f"""\
-You are the EXECUTOR. You are provided a excel related task, you are also provided a 'plan file' which contains the potentially task relavent column or row labels and key observations. Based on the task description and the plan file, you may first come up with potential formulas or relationships to use to solve the task, using the variables and locations given in the plan file (you can trust the label and location information in plan file to avoid excessive workbook inspection). If you think the formula you want to use contains variables that are not given in the plan file, you may use the search tools in the MCP server to find information you need. After you have a good idea of the procedures you may take to solve the task, write your implementation plan to {impl_path}. You may implement the task by modifying the workbook using xlwings (and Excel mcp inspection tools as needed). If a prior evaluation report is provided, treat its findings as authoritative and fix them. 
+You are the EXECUTOR. You are provided a excel related task, you are also provided a 'plan file' which contains the task relavent column or row labels and key observations. Based on the task description and the plan file, you may first come up with potential formulas or relationships to use to solve the task, using the variables and locations given in the plan file (you can trust the label and location information in plan file to avoid excessive workbook inspection). If you think the formula you want to use contains variables that are not given in the plan file, you may use the search tools in the MCP server to find information you need. After you have a good idea of the procedures you may take to solve the task, write your implementation plan to {impl_path}. You may implement the task by modifying the workbook using xlwings (and Excel mcp inspection tools as needed). If a prior evaluation report is provided, treat its findings as authoritative and fix them. 
 
 Important: your checklist items should be specific actionable steps with reference to relavent items in the excel workbook (such as Update downstream cash-flow add-back at xxx so it references the populated amortization rows.) instead of vague general instructions like "Update the cash-flow add-back".
 
@@ -193,9 +194,8 @@ Plan file: {plan_path}
 Prior implementation report (may be None): {impl_path_or_none}
 Prior evaluation report (may be None): {eval_path_or_none}
 Prior error hint (may be None): {hint_path_or_none}
-Workbook to modify: {workbook}
-Workbook folder (contains all task files): {workbook_dir}
-{workbook_note}
+Workbook folder to modify (pick .xlsx inside it if present): {workbook_dir}
+{staging_note}
 Final deliverable folder: {final_dir}
 """
 
@@ -203,9 +203,8 @@ Final deliverable folder: {final_dir}
         self,
         task: str,
         plan_path: Path,
-        workbook: Path,
         workbook_dir: Path,
-        workbook_note: str,
+        staging_note: str,
         final_dir: Path,
         impl_path: Path,
         impl_path_or_none: Path | None,
@@ -224,9 +223,8 @@ Final deliverable folder: {final_dir}
         return self._stream(self.build_prompt(
             task=task,
             plan_path=plan_path,
-            workbook=workbook,
             workbook_dir=workbook_dir,
-            workbook_note=workbook_note,
+            staging_note=staging_note,
             final_dir=final_dir,
             impl_path=impl_path,
             impl_path_or_none=impl_path_or_none,
@@ -248,19 +246,18 @@ class EvaluatorAgent(BaseAgent):
         self,
         plan_path: Path,
         impl_path: Path,
-        workbook: Path,
         workbook_dir: Path,
-        workbook_note: str,
+        staging_note: str,
         final_dir: Path,
         eval_path: Path,
-        task: Path,
+        task: str,
         run_dir: Path,
     ) -> str:
         return f"""\
 
 ## Role Description:        
-You are the EVALUATOR. You verify the Executor Agent's work through its final deliverable {final_dir} and the implementation report {impl_path} based on the task description {task}. The Plan file {plan_path} contains locations of potentially relavent item locations to guide your lookup, if your check inovles them. Workbook copy (published by orchestrator, inside {final_dir}): {workbook}. Original task workbook folder: {workbook_dir}
-{workbook_note}
+You are the EVALUATOR. You verify the Executor Agent's work through its final deliverable {final_dir} and the implementation report {impl_path} based on the task description {task}. The Plan file {plan_path} contains locations of potentially relavent item locations to guide your lookup, if your check inovles them. Workbook folder (published by orchestrator, inside {final_dir}): {final_dir}. Original task workbook folder: {workbook_dir}
+{staging_note}
 
 You need to read through the provided files first and come up with a checklist of checks to verify whether the executor correctly fulfilled the task to write to your evaluation report at {eval_path}. Then, you may check against the checklist one by one (mark the checklist items in the report as PASSED or FAILED with concise yet informative explainations as you go through the checklist items). Finally, provide a one word final verdict in a "Verdict" sectionat the end of your evaluation report to indicate whether the executor successfully fulfilled the task. The verdict should be one of the following: "Success", "Redo", or "Reset". Here is the standard for each verdict:
 
@@ -318,20 +315,18 @@ exactly one verdict tag on its own (same as the verdict in your evaluation repor
         self,
         plan_path: Path,
         impl_path: Path,
-        workbook: Path,
         workbook_dir: Path,
-        workbook_note: str,
+        staging_note: str,
         final_dir: Path,
         eval_path: Path,
-        task: Path,
+        task: str,
         run_dir: Path,
     ) -> tuple[str, str]:
         prompt = self.build_prompt(
             plan_path=plan_path,
             impl_path=impl_path,
-            workbook=workbook,
             workbook_dir=workbook_dir,
-            workbook_note=workbook_note,
+            staging_note=staging_note,
             final_dir=final_dir,
             eval_path=eval_path,
             task=task,

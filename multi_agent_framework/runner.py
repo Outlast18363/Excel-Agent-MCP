@@ -13,7 +13,17 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from .excel_lifecycle import cleanup_excel_spawned_since, snapshot_excel_pids
 from .orchestrator import MAX_REDO, MAX_RESET, Orchestrator
+
+
+def _derive_workbook_dir(workbooks: list[Path]) -> Path:
+    if not workbooks:
+        raise ValueError("either --workbook-dir or --workbooks is required")
+    parents = {path.parent for path in workbooks}
+    if len(parents) != 1:
+        raise ValueError("--workbooks must all be staged in the same directory")
+    return next(iter(parents))
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -21,11 +31,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--task", required=True, help="natural-language task for the agent team")
     p.add_argument(
         "--workbooks",
-        required=True,
         nargs="+",
         type=Path,
+        default=None,
         help="Task workbook/source file paths staged inside the run workbook directory. "
              "The framework snapshots this full set and restores the folder from it on reset.",
+    )
+    p.add_argument(
+        "--workbook-dir",
+        type=Path,
+        default=None,
+        help="Path to the staged workbook/source-file directory. Preferred over --workbooks.",
     )
     p.add_argument(
         "--run-dir",
@@ -62,22 +78,45 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "trace.jsonl").unlink(missing_ok=True)
     (run_dir / "wrapper_summary.json").unlink(missing_ok=True)
 
-    missing = [path for path in args.workbooks if not path.exists()]
-    if missing:
-        print(f"workbook not found: {missing[0]}", file=sys.stderr)
-        return 2
+    workbook_dir: Path | None = None
+    if args.workbook_dir is not None:
+        workbook_dir = args.workbook_dir.resolve()
+        if not workbook_dir.exists():
+            print(f"workbook directory not found: {workbook_dir}", file=sys.stderr)
+            return 2
+        if not workbook_dir.is_dir():
+            print(f"workbook directory is not a directory: {workbook_dir}", file=sys.stderr)
+            return 2
+        if not any(path.is_file() or path.is_symlink() for path in workbook_dir.iterdir()):
+            print(f"workbook directory is empty: {workbook_dir}", file=sys.stderr)
+            return 2
+    else:
+        workbooks = [path.resolve() for path in (args.workbooks or [])]
+        missing = [path for path in workbooks if not path.exists()]
+        if missing:
+            print(f"workbook not found: {missing[0]}", file=sys.stderr)
+            return 2
+        try:
+            workbook_dir = _derive_workbook_dir(workbooks)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
 
     # When --task-id is omitted, fall back to the run_dir basename so the run
     # still has a stable identifier in logs and summaries.
     task_id = args.task_id or run_dir.name
 
-    result = Orchestrator(
-        task=args.task,
-        workbooks=args.workbooks,
-        empty_workbook_created=args.empty_workbook_created,
-        run_dir=run_dir,
-        task_id=task_id,
-    ).run()
+    excel_pids_before = snapshot_excel_pids()
+    try:
+        result = Orchestrator(
+            task=args.task,
+            workbook_dir=workbook_dir,
+            empty_workbook_created=args.empty_workbook_created,
+            run_dir=run_dir,
+            task_id=task_id,
+        ).run()
+    finally:
+        cleanup_excel_spawned_since(excel_pids_before)
 
     summary = {
         "verdict": result.verdict,
