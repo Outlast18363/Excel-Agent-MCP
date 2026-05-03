@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, datetime
+from unittest.mock import patch
 
 from excel_mcp.helpers import (
     ExcelServiceError,
     build_trace_node_payload,
     column_number_to_name,
+    default_sheet_screenshot_output_path,
     default_screenshot_output_path,
     expand_formulas_ref,
     format_formulas_ref,
@@ -19,7 +21,9 @@ from excel_mcp.helpers import (
     normalize_range_read_matrix,
     normalize_trace_ref,
     parse_formulas_ref,
+    resolve_soffice_path,
     style_payload_key,
+    validate_positive_integer,
     validate_matrix_shape,
 )
 from excel_mcp.types import error_response, normalize_excel_value, success_response
@@ -135,6 +139,30 @@ class HelperTests(unittest.TestCase):
             path.name,
             "local_screenshot_wb_001_Five_Year_Review_A1_G40.png",
         )
+
+    def test_default_sheet_screenshot_output_path_uses_repo_output_directory(self) -> None:
+        """Verify full-sheet screenshot defaults land under the repo output directory."""
+
+        path = default_sheet_screenshot_output_path(
+            workbook_path="/tmp/Quarterly Review.xlsx",
+            sheet="Five Year Review",
+        )
+
+        self.assertEqual(path.suffix, ".png")
+        self.assertEqual(path.parent.name, "screenshots")
+        self.assertEqual(path.name, "sheet_screenshot_Quarterly_Review_Five_Year_Review.png")
+
+    def test_validate_positive_integer_rejects_invalid_values(self) -> None:
+        """Verify positive-integer validation rejects bad input."""
+
+        with self.assertRaises(ExcelServiceError):
+            validate_positive_integer(0, "timeout_seconds")
+
+    def test_resolve_soffice_path_prefers_path_entries(self) -> None:
+        """Verify soffice lookup falls back to PATH executables."""
+
+        with patch("excel_mcp.helpers.shutil.which", side_effect=["/usr/bin/soffice", None]):
+            self.assertEqual(resolve_soffice_path(None), "/usr/bin/soffice")
 
     def test_normalize_matrix_input_wraps_single_cell_scalar(self) -> None:
         """Verify a scalar write payload is accepted for a single-cell target.

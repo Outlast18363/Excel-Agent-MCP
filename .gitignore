@@ -19,3 +19,7 @@ tests/test_output/
 .cursor/
 .DS_Store
 *.swp
+
+# Local OpenRouter key for two_agent_framework (see config.py)
+.openrouter_api_key
+two_agent_framework/local_provider.json

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -845,6 +847,69 @@ def default_screenshot_output_path(*, workbook_id: str, sheet: str, range_addres
         f"{_safe_path_component(range_address)}.png"
     )
     return repo_root / "output" / "spreadsheet" / "screenshots" / filename
+
+
+def default_sheet_screenshot_output_path(*, workbook_path: str, sheet: str) -> Path:
+    """Build the default repo-local PNG path for ``sheet_screenshot`` output.
+
+    Parameters:
+        workbook_path: The workbook path used to derive a stable filename stem.
+        sheet: The sheet name associated with the rendered worksheet.
+
+    Returns:
+        A path rooted under ``output/spreadsheet/screenshots`` inside the repo.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    workbook_stem = Path(workbook_path).stem or "workbook"
+    filename = (
+        "sheet_screenshot_"
+        f"{_safe_path_component(workbook_stem)}_"
+        f"{_safe_path_component(sheet)}.png"
+    )
+    return repo_root / "output" / "spreadsheet" / "screenshots" / filename
+
+
+def resolve_soffice_path(override: str | None = None) -> str:
+    """Resolve the LibreOffice CLI path for headless export operations.
+
+    Parameters:
+        override: Explicit user-supplied executable path.
+
+    Returns:
+        The resolved executable path as a string.
+    """
+
+    candidates = [
+        override,
+    ]
+    env_value = None if override else os.environ.get("EXCEL_MCP_SOFFICE")
+    candidates.append(env_value)
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate_path = Path(candidate).expanduser()
+        if candidate_path.exists():
+            return str(candidate_path)
+
+    for program_name in ("soffice", "libreoffice"):
+        resolved = shutil.which(program_name)
+        if resolved:
+            return resolved
+
+    raise ExcelServiceError(
+        "LibreOffice CLI was not found. Set `soffice_path`, "
+        "`EXCEL_MCP_SOFFICE`, or install `soffice`/`libreoffice` on PATH."
+    )
+
+
+def validate_positive_integer(value: int, field_name: str) -> int:
+    """Validate that a user-supplied integer is positive."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ExcelServiceError(f"`{field_name}` must be a positive integer.")
+    return value
 
 
 def _all_scalars(values: list[Any]) -> bool:

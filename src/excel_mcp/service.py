@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
+import subprocess
 import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -21,6 +23,7 @@ from .helpers import (
     build_style_lookup,
     build_trace_node_payload,
     column_number_to_name,
+    default_sheet_screenshot_output_path,
     default_screenshot_output_path,
     expand_formulas_ref,
     extract_excel_error,
@@ -37,9 +40,11 @@ from .helpers import (
     normalize_range_read_matrix,
     normalize_trace_ref,
     read_number_format,
+    resolve_soffice_path,
     row_column_to_a1_address,
     safe_count,
     sheet_visible,
+    validate_positive_integer,
 )
 from .types import JsonValue
 
@@ -544,6 +549,72 @@ class ExcelService:
 
         return data
 
+    def sheet_screenshot(
+        self,
+        *,
+        path: str,
+        sheet: str,
+        output_path: str | None = None,
+        max_width_px: int = 2400,
+        max_height_px: int = 2400,
+        timeout_seconds: int = 120,
+        soffice_path: str | None = None,
+    ) -> dict[str, JsonValue]:
+        resolved_path = str(Path(path).expanduser().resolve(strict=False))
+        workbook_path = Path(resolved_path)
+        if not workbook_path.exists():
+            raise ExcelServiceError(f"Workbook does not exist: {resolved_path}")
+
+        validated_width = validate_positive_integer(max_width_px, "max_width_px")
+        validated_height = validate_positive_integer(max_height_px, "max_height_px")
+        validated_timeout = validate_positive_integer(timeout_seconds, "timeout_seconds")
+
+        self._sync_workbook_for_fresh_render(resolved_path)
+        page_index = self._get_sheet_page_index(resolved_path, sheet)
+        resolved_soffice_path = resolve_soffice_path(soffice_path)
+
+        target_path = (
+            Path(output_path).expanduser()
+            if output_path
+            else default_sheet_screenshot_output_path(
+                workbook_path=resolved_path,
+                sheet=sheet,
+            )
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.TemporaryDirectory(prefix="excel-mcp-sheet-screenshot-") as temp_dir:
+            temp_root = Path(temp_dir)
+            export_dir = temp_root / "export"
+            profile_dir = temp_root / "profile"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            profile_dir.mkdir(parents=True, exist_ok=True)
+
+            self._export_sheet_pdf_with_libreoffice(
+                workbook_path=resolved_path,
+                export_dir=export_dir,
+                profile_dir=profile_dir,
+                page_index=page_index,
+                soffice_path=resolved_soffice_path,
+                timeout_seconds=validated_timeout,
+            )
+
+            exported_pdf = export_dir / f"{workbook_path.stem}.pdf"
+            if not exported_pdf.exists():
+                raise ExcelServiceError(
+                    "LibreOffice did not produce the expected PDF export for "
+                    f"`{sheet}`."
+                )
+
+            self._rasterize_pdf_first_page(
+                pdf_path=exported_pdf,
+                output_path=target_path,
+                max_width_px=validated_width,
+                max_height_px=validated_height,
+            )
+
+        return {"image_path": str(target_path)}
+
     def close_workbook(
         self,
         *,
@@ -985,6 +1056,150 @@ class ExcelService:
                 "The `formulas` package is required to trace formula dependencies."
             ) from exc
         return formulas
+
+    def _require_pymupdf(self) -> Any:
+        try:
+            import fitz
+        except ImportError as exc:
+            raise ExcelServiceError(
+                "PyMuPDF is required to render `sheet_screenshot` PNG output."
+            ) from exc
+        return fitz
+
+    def _sync_workbook_for_fresh_render(self, path: str) -> None:
+        workbook_id = self._path_index.get(path)
+        if workbook_id is None:
+            return
+
+        session = self._workbooks.get(workbook_id)
+        if session is None:
+            return
+        if session.read_only:
+            raise ExcelServiceError(
+                "Cannot guarantee a fresh sheet screenshot because workbook "
+                f"`{workbook_id}` is open read-only in this MCP session."
+            )
+
+        try:
+            session.app.calculate()
+            session.workbook.save()
+        except Exception as exc:
+            raise ExcelServiceError(
+                "Workbook could not be recalculated and saved before taking a "
+                f"fresh sheet screenshot: `{path}`."
+            ) from exc
+
+    def _get_sheet_page_index(self, workbook_path: str, sheet: str) -> int:
+        workbook = None
+        try:
+            workbook = load_workbook(
+                workbook_path,
+                read_only=True,
+                data_only=False,
+                keep_links=False,
+            )
+            if sheet not in workbook.sheetnames:
+                raise ExcelServiceError(
+                    f"Sheet `{sheet}` was not found in workbook `{workbook_path}`."
+                )
+            return workbook.sheetnames.index(sheet) + 1
+        except ExcelServiceError:
+            raise
+        except Exception as exc:
+            raise ExcelServiceError(
+                f"Workbook `{workbook_path}` could not be opened to resolve sheet `{sheet}`."
+            ) from exc
+        finally:
+            if workbook is not None:
+                workbook.close()
+
+    def _export_sheet_pdf_with_libreoffice(
+        self,
+        *,
+        workbook_path: str,
+        export_dir: Path,
+        profile_dir: Path,
+        page_index: int,
+        soffice_path: str,
+        timeout_seconds: int,
+    ) -> None:
+        filter_options = json.dumps(
+            {
+                "SinglePageSheets": {"type": "boolean", "value": "true"},
+                "PageRange": {"type": "string", "value": str(page_index)},
+            },
+            separators=(",", ":"),
+        )
+        command = [
+            soffice_path,
+            f"-env:UserInstallation={profile_dir.resolve().as_uri()}",
+            "--headless",
+            "--convert-to",
+            f"pdf:calc_pdf_Export:{filter_options}",
+            "--outdir",
+            str(export_dir),
+            workbook_path,
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ExcelServiceError(
+                "LibreOffice timed out while exporting the sheet screenshot."
+            ) from exc
+        except OSError as exc:
+            raise ExcelServiceError(
+                f"LibreOffice could not be started from `{soffice_path}`."
+            ) from exc
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            if detail:
+                raise ExcelServiceError(
+                    f"LibreOffice sheet export failed: {detail}"
+                )
+            raise ExcelServiceError("LibreOffice sheet export failed.")
+
+    def _rasterize_pdf_first_page(
+        self,
+        *,
+        pdf_path: Path,
+        output_path: Path,
+        max_width_px: int,
+        max_height_px: int,
+    ) -> None:
+        fitz = self._require_pymupdf()
+
+        document = None
+        try:
+            document = fitz.open(str(pdf_path))
+            if document.page_count < 1:
+                raise ExcelServiceError("LibreOffice produced an empty PDF export.")
+
+            page = document.load_page(0)
+            page_rect = page.rect
+            x_scale = max_width_px / float(page_rect.width)
+            y_scale = max_height_px / float(page_rect.height)
+            scale = min(x_scale, y_scale)
+            if scale <= 0:
+                raise ExcelServiceError("Screenshot size constraints must be positive.")
+
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            pixmap.save(str(output_path))
+        except ExcelServiceError:
+            raise
+        except Exception as exc:
+            raise ExcelServiceError(
+                f"PDF export could not be rasterized into a PNG: `{pdf_path}`."
+            ) from exc
+        finally:
+            if document is not None:
+                document.close()
 
     def _build_trace_root_refs(
         self,

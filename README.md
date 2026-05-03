@@ -12,6 +12,7 @@ This mcp aims to help advanced agents runing in codex or claude to smoothly expl
 - `set_range`
 - `recalculate`
 - `local_screenshot`
+- `sheet_screenshot`
 - `trace_formula`
 
 Every tool returns the same response envelope:
@@ -29,6 +30,7 @@ Every tool returns the same response envelope:
 
 - Python 3.11+
 - Microsoft Excel installed locally
+- LibreOffice installed locally for `sheet_screenshot`
 - `xlwings`, `formulas`, and the official Python `mcp` SDK
 
 ## Install
@@ -251,6 +253,7 @@ claude mcp add --transport stdio excel-mcp -- \
 - `set_range` applies writes in a stable order and formulas overwrite values when both are supplied.
 - `recalculate` scans only formula-bearing cells for errors.
 - `local_screenshot` relies on xlwings' `Range.to_png()` feature which uses Excel's native export capability and returns a reusable `image_path` instead of inline base64 payloads.
+- `sheet_screenshot` renders one full worksheet to a PNG through headless LibreOffice. If the workbook is already open in this MCP, the tool recalculates and saves before rendering; otherwise it renders the latest saved file on disk.
 - `trace_formula` creates a temporary workbook snapshot and analyzes it with `formulas.ExcelModel`.
 - `trace_formula` returns a flat graph using `nodes` and `edges`, and `max_depth=None` performs full transitive expansion.
 - The server never writes logs to `stdout`; logs belong on `stderr` so MCP traffic stays clean.

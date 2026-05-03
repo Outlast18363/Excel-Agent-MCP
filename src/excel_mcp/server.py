@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from typing import Annotated, Any
 
@@ -16,6 +17,13 @@ mcp_server = FastMCP("Excel MCP")
 
 McpToolResult = tuple[list[TextContent], McpResponse]
 StructuredOnlyToolResult = Annotated[CallToolResult, McpResponse]
+
+
+def _disabled_mcp_tool_names() -> frozenset[str]:
+    """Tools blocked via comma-separated ``EXCEL_MCP_DISABLED_TOOLS`` (case-insensitive)."""
+
+    raw = os.environ.get("EXCEL_MCP_DISABLED_TOOLS", "")
+    return frozenset(name.strip().lower() for name in raw.split(",") if name.strip())
 
 
 def _build_tool_result(payload: McpResponse) -> McpToolResult:
@@ -264,6 +272,15 @@ def get_range(
         fields controlled by the ``include_*`` flags.
     """
 
+    if "get_range" in _disabled_mcp_tool_names():
+        return _build_structured_tool_result(
+            error_response(
+                "get_range is disabled on this MCP server "
+                "(set via EXCEL_MCP_DISABLED_TOOLS)."
+            ),
+            is_error=True,
+        )
+
     return _execute_structured_tool(
         lambda: excel_service.get_range(
             workbook_id=workbook_id,
@@ -417,6 +434,50 @@ def local_screenshot(
             sheet=sheet,
             range_address=range,
             output_path=output_path,
+        )
+    )
+
+
+@mcp_server.tool()
+def sheet_screenshot(
+    path: str,
+    sheet: str,
+    output_path: str | None = None,
+    max_width_px: int = 2400,
+    max_height_px: int = 2400,
+    timeout_seconds: int = 120,
+    soffice_path: str | None = None,
+) -> McpToolResult:
+    """Render one whole worksheet to a PNG using headless LibreOffice.
+
+    If the workbook is already open in this MCP process, the tool forces a
+    recalculation and save before rendering. Otherwise it renders the latest
+    saved workbook file on disk.
+
+    Parameters:
+        path: Filesystem path to the workbook to render.
+        sheet: The sheet name to export as a full-sheet image.
+        output_path: Destination path for the PNG file. When omitted, the
+            server writes a stable PNG under ``output/spreadsheet/screenshots/``.
+        max_width_px: Maximum output width in pixels.
+        max_height_px: Maximum output height in pixels.
+        timeout_seconds: Timeout for the LibreOffice export subprocess.
+        soffice_path: Optional explicit path to the LibreOffice executable.
+
+    Returns:
+        ``image_path`` for the written PNG. Callers should use the returned
+        path instead of requesting inline image bytes.
+    """
+
+    return _execute_tool(
+        lambda: excel_service.sheet_screenshot(
+            path=path,
+            sheet=sheet,
+            output_path=output_path,
+            max_width_px=max_width_px,
+            max_height_px=max_height_px,
+            timeout_seconds=timeout_seconds,
+            soffice_path=soffice_path,
         )
     )
 

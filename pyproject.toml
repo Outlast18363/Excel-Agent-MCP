@@ -13,6 +13,7 @@ dependencies = [
   "mcp",
   "openpyxl",
   "Pillow",
+  "PyMuPDF",
   "xlwings",
 ]
 

@@ -28,11 +28,12 @@ SANDBOX_MODE = "danger-full-access" if os.name == "nt" else "workspace-write"
 
 # Per-role excel-mcp tool allowlists. Planner only inspects; Executor mutates;
 # Evaluator inspects and can trace formulas to verify the Executor's work.
-_PLANNER_TOOLS = ["open_workbook", "get_sheet_state", "local_screenshot", "get_range", "close_workbook", "search_cell"]
+_PLANNER_TOOLS = ["open_workbook", "get_sheet_state", "local_screenshot", "close_workbook", "search_cell"]
 ROLE_TOOLS: dict[str, list[str]] = {
     "Planner": _PLANNER_TOOLS,
     "Executor": _PLANNER_TOOLS + ["web_search"],
-    "Evaluator": _PLANNER_TOOLS + ["trace_formula"],
+    "Evaluator": _PLANNER_TOOLS,
+    # "Evaluator": _PLANNER_TOOLS + ["trace_formula"],
     # Distiller is pure text-to-text (eval report -> execution hint); no MCP
     # tools needed. Empty allowlist disables every excel-mcp tool for its subprocess.
     "Distiller": [],
@@ -57,8 +58,16 @@ def _excel_mcp_overrides(role: str) -> list[str]:
         ("tool_timeout_sec", "120"),
         ("enabled", "true"),
         ("enabled_tools", u(ROLE_TOOLS[role])),
+        ("disabled_tools", u(["get_range"])),
     )
-    return [p for n, v in rows for p in ("-c", f"{k}{n} = {v}")]
+    parts = [p for n, v in rows for p in ("-c", f"{k}{n} = {v}")]
+    parts.extend(
+        [
+            "-c",
+            f'{k}env = {{ EXCEL_MCP_DISABLED_TOOLS = "get_range" }}',
+        ]
+    )
+    return parts
 
 
 def build_codex_cmd(role: str, workspace: Path) -> list[str]:

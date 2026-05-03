@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import unittest
 from unittest.mock import patch
 
@@ -114,6 +115,15 @@ class ServerToolTests(unittest.TestCase):
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["data"]["range"], "A1:B2")
 
+    def test_get_range_disabled_via_env(self) -> None:
+        """When ``EXCEL_MCP_DISABLED_TOOLS`` lists ``get_range``, calls fail fast."""
+
+        with patch.dict(os.environ, {"EXCEL_MCP_DISABLED_TOOLS": "get_range, trace_formula"}):
+            response = unwrap_tool_response(server.get_range("wb_001", "Sheet1", "A1"))
+
+        self.assertEqual(response["status"], "error")
+        self.assertTrue(any("disabled" in err.lower() for err in response["errors"]))
+
     def test_set_range_success(self) -> None:
         """Verify ``set_range`` exposes service write results through the MCP envelope.
 
@@ -164,6 +174,16 @@ class ServerToolTests(unittest.TestCase):
 
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["data"]["image_path"], "/tmp/out.png")
+
+    def test_sheet_screenshot_success(self) -> None:
+        """Verify ``sheet_screenshot`` exposes image metadata through the MCP envelope."""
+
+        payload = {"image_path": "/tmp/sheet.png"}
+        with patch.object(server.excel_service, "sheet_screenshot", return_value=payload):
+            response = unwrap_tool_response(server.sheet_screenshot("/tmp/book.xlsx", "Sheet1"))
+
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(response["data"]["image_path"], "/tmp/sheet.png")
 
     def test_trace_formula_success(self) -> None:
         """Verify ``trace_formula`` exposes trace results through the MCP envelope.
